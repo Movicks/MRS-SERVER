@@ -1,29 +1,29 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { DoctorDayList, DoctorDayListDocument } from './daylist.schema';
-import { VitalSign, VitalSignDocument } from '../gopd/vitals.schema';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class DayListService {
-  constructor(
-    @InjectModel(DoctorDayList.name) private readonly model: Model<DoctorDayListDocument>,
-    @InjectModel(VitalSign.name) private readonly vitalsModel: Model<VitalSignDocument>
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async add(patientId: string, addedBy?: string, sourceDepartment?: string) {
-    const pid = new Types.ObjectId(patientId);
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
-    const hasVitalsToday = await this.vitalsModel.exists({ patientId: pid, recordedAt: { $gte: start, $lt: end } });
+
+    const hasVitalsToday = await this.prisma.vitalSign.findFirst({
+      where: { patientId, recordedAt: { gte: start, lt: end } }
+    });
     if (!hasVitalsToday) throw new BadRequestException('Patient has no vitals recorded today');
-    const existing = await this.model.findOne({ patientId: pid, createdAt: { $gte: start, $lt: end } }).lean();
+
+    const existing = await this.prisma.doctorDayList.findFirst({
+      where: { patientId, createdAt: { gte: start, lt: end } }
+    });
     if (existing) return existing;
-    const doc = new this.model({ patientId: pid, addedBy: addedBy ? new Types.ObjectId(addedBy) : undefined, sourceDepartment });
-    const saved = await doc.save();
-    return saved.toObject();
+
+    return this.prisma.doctorDayList.create({
+      data: { patientId, addedBy, sourceDepartment }
+    });
   }
 
   async list(sourceDepartment?: string, range?: 'today' | 'all', start?: string, end?: string) {
@@ -33,27 +33,36 @@ export class DayListService {
       const s = start ? new Date(start) : new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const e = end ? new Date(end) : new Date(s);
       if (!end) e.setDate(e.getDate() + 1);
-      q.createdAt = { $gte: s, $lt: e };
+      q.createdAt = { gte: s, lt: e };
     }
     if (sourceDepartment) q.sourceDepartment = sourceDepartment;
-    const docs = await this.model.find(q).populate('patientId').lean();
+
+    const docs = await this.prisma.doctorDayList.findMany({ where: q });
+
+    const patientIds = Array.from(new Set(docs.map((d) => d.patientId).filter(Boolean)));
+    const patients = await this.prisma.patient.findMany({
+      where: { id: { in: patientIds } }
+    });
+    const patientMap = new Map<string, any>();
+    for (const p of patients) patientMap.set(p.id, p);
+
     const latestByPatient = new Map<string, any>();
-    for (const d of docs as any[]) {
-      const pid = String((d as any).patientId?._id || (d as any).patientId || '');
+    for (const d of docs) {
+      const pid = d.patientId;
       const prev = latestByPatient.get(pid);
-      if (!prev || new Date((d as any).createdAt).getTime() > new Date((prev as any).createdAt).getTime()) {
+      if (!prev || new Date(d.createdAt).getTime() > new Date(prev.createdAt).getTime()) {
         latestByPatient.set(pid, d);
       }
     }
     const deduped = Array.from(latestByPatient.values());
-    return deduped.map((d: any) => {
-      const p = d.patientId || {};
+    return deduped.map((d) => {
+      const p = patientMap.get(d.patientId) || {};
       const fullName = [p.surname, p.firstname, p.middlename].filter(Boolean).join(' ');
       const phone = p.phone || '';
       const cardNumber = p.veteran ? (p.serviceNumber || '') : (p.membershipNumber || '');
       const rank = p.rank || '';
       return {
-        patientId: String(d.patientId?._id || d.patientId || ''),
+        patientId: d.patientId,
         fullName,
         phone,
         cardNumber,

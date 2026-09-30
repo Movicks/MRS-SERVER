@@ -1,11 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { PriceItem, PriceItemDocument } from './price-item.schema';
-import { PriceListSummary, PriceListSummaryDocument } from './price-list-summary.schema';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 import { CreatePriceItemDto } from './dto/create-price-item.dto';
 import { UpdatePriceItemDto } from './dto/update-price-item.dto';
-import { BillingRoute, CopayStatus, Invoice, InvoiceDocument, NHIAStampStatus } from '../invoices/invoice.schema';
 
 export type ListPriceItemsQuery = {
   q?: string;
@@ -16,28 +12,15 @@ export type ListPriceItemsQuery = {
 export type SummaryPeriod = 'monthly' | 'yearly';
 
 @Injectable()
-export class PriceListService implements OnModuleInit {
-  constructor(
-    @InjectModel(PriceItem.name)
-    private readonly priceItemModel: Model<PriceItemDocument>,
-    @InjectModel(PriceListSummary.name)
-    private readonly priceListSummaryModel: Model<PriceListSummaryDocument>,
-    @InjectModel(Invoice.name)
-    private readonly invoices: Model<InvoiceDocument>,
-  ) {}
+export class PriceListService {
+  constructor(private readonly prisma: PrismaService) {}
 
-  async onModuleInit() {
-    await this.priceItemModel.syncIndexes();
-    await this.priceListSummaryModel.syncIndexes();
-  }
-
-  async list(query: ListPriceItemsQuery): Promise<PriceItemDocument[]> {        
+  async list(query: ListPriceItemsQuery): Promise<any[]> {
     const filter: any = {};
 
     if (query.category) {
-      const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const raw = String(query.category || '').trim();
-      if (raw) filter.category = { $regex: new RegExp(`^${escapeRegex(raw)}$`, 'i') };
+      if (raw) filter.category = { equals: raw, mode: 'insensitive' };
     }
 
     if (query.activeOnly) {
@@ -45,20 +28,27 @@ export class PriceListService implements OnModuleInit {
     }
 
     if (query.q && query.q.trim().length > 0) {
-      const search = new RegExp(query.q.trim(), 'i');
-      filter.$or = [{ name: search }, { description: search }, { unit: search }];
+      const search = query.q.trim();
+      filter.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+        { unit: { contains: search, mode: 'insensitive' } },
+      ];
     }
 
-    return this.priceItemModel.find(filter).sort({ sortOrder: 1, name: 1 }).lean();
+    return this.prisma.priceItem.findMany({
+      where: filter,
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }]
+    });
   }
 
-  async findOne(id: string): Promise<PriceItemDocument> {
-    const doc = await this.priceItemModel.findById(id);
+  async findOne(id: string): Promise<any> {
+    const doc = await this.prisma.priceItem.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Price item not found');
     return doc;
   }
 
-  async create(dto: CreatePriceItemDto): Promise<PriceItemDocument> {
+  async create(dto: CreatePriceItemDto): Promise<any> {
     this.validatePrice(dto.price);
     this.validateQuantity(dto.stockQuantity);
     this.validateQuantity(dto.soldQuantity);
@@ -68,91 +58,103 @@ export class PriceListService implements OnModuleInit {
       await this.ensureUniqueBedWard(dto.name, undefined);
     }
 
-    const doc = new this.priceItemModel({
-      name: dto.name.trim(),
-      category: String(dto.category || '').trim().toLowerCase(),
-      description: dto.description?.trim() || '',
-      unit: dto.unit?.trim() || 'per item',
-      price: dto.price,
-      isActive: dto.isActive ?? true,
-      sortOrder: dto.sortOrder ?? 0,
-      stockQuantity: dto.stockQuantity ?? 0,
-      soldQuantity: dto.soldQuantity ?? 0,
+    const result = await this.prisma.priceItem.create({
+      data: {
+        name: dto.name.trim(),
+        category: String(dto.category || '').trim().toLowerCase(),
+        description: dto.description?.trim() || '',
+        unit: dto.unit?.trim() || 'per item',
+        price: dto.price,
+        isActive: dto.isActive ?? true,
+        sortOrder: dto.sortOrder ?? 0,
+        stockQuantity: dto.stockQuantity ?? 0,
+        soldQuantity: dto.soldQuantity ?? 0,
+      }
     });
 
-    const result = await doc.save();
     await this.recalculateAllSummaries();
     return result;
   }
 
-  async update(id: string, dto: UpdatePriceItemDto): Promise<PriceItemDocument> {
-    const current = await this.priceItemModel.findById(id).lean();
+  async update(id: string, dto: UpdatePriceItemDto): Promise<any> {
+    const current = await this.prisma.priceItem.findUnique({ where: { id } });
     if (!current) throw new NotFoundException('Price item not found');
 
-    const update: any = {};
+    const updateData: any = {};
 
-    if (dto.name !== undefined) update.name = dto.name.trim();
-    if (dto.category !== undefined) update.category = String(dto.category || '').trim().toLowerCase();
-    if (dto.description !== undefined) update.description = dto.description.trim();
-    if (dto.unit !== undefined) update.unit = dto.unit.trim() || 'per item';    
+    if (dto.name !== undefined) updateData.name = dto.name.trim();
+    if (dto.category !== undefined) updateData.category = String(dto.category || '').trim().toLowerCase();
+    if (dto.description !== undefined) updateData.description = dto.description.trim();
+    if (dto.unit !== undefined) updateData.unit = dto.unit.trim() || 'per item';
     if (dto.price !== undefined) {
       this.validatePrice(dto.price);
-      update.price = dto.price;
+      updateData.price = dto.price;
     }
-    if (dto.isActive !== undefined) update.isActive = dto.isActive;
-    if (dto.sortOrder !== undefined) update.sortOrder = dto.sortOrder;
+    if (dto.isActive !== undefined) updateData.isActive = dto.isActive;
+    if (dto.sortOrder !== undefined) updateData.sortOrder = dto.sortOrder;
     if (dto.stockQuantity !== undefined) {
       this.validateQuantity(dto.stockQuantity);
-      update.stockQuantity = dto.stockQuantity;
+      updateData.stockQuantity = dto.stockQuantity;
     }
     if (dto.soldQuantity !== undefined) {
       this.validateQuantity(dto.soldQuantity);
-      update.soldQuantity = dto.soldQuantity;
+      updateData.soldQuantity = dto.soldQuantity;
     }
 
-    const nextCategory = String((dto.category ?? (current as any).category) || '').trim().toLowerCase();
+    const nextCategory = String((dto.category ?? current.category) || '').trim().toLowerCase();
     if (nextCategory === 'bed') {
-      const nextStock = dto.stockQuantity ?? (current as any).stockQuantity;
-      const nextUsed = dto.soldQuantity ?? (current as any).soldQuantity;
+      const nextStock = dto.stockQuantity ?? current.stockQuantity;
+      const nextUsed = dto.soldQuantity ?? current.soldQuantity;
       this.validateBedQuantity(nextStock);
       this.validateBedUsed(nextUsed, nextStock);
-      const nextName = String(dto.name ?? (current as any).name ?? '');
-      await this.ensureUniqueBedWard(nextName, String((current as any)._id || id));
+      const nextName = String(dto.name ?? current.name ?? '');
+      await this.ensureUniqueBedWard(nextName, id);
     }
 
-    const doc = await this.priceItemModel.findByIdAndUpdate(id, update, { new: true });
+    const doc = await this.prisma.priceItem.update({
+      where: { id },
+      data: updateData
+    }).catch(() => null);
+
     if (!doc) throw new NotFoundException('Price item not found');
     await this.recalculateAllSummaries();
     return doc;
   }
 
-  async recordDispense(id: string, quantity: number): Promise<PriceItemDocument> {
+  async recordDispense(id: string, quantity: number): Promise<any> {
     this.validateQuantity(quantity);
     if (quantity <= 0) {
       throw new BadRequestException('Dispensed quantity must be greater than zero');
     }
 
-    const item = await this.priceItemModel.findById(id);
+    const item = await this.prisma.priceItem.findUnique({ where: { id } });
     if (!item) throw new NotFoundException('Price item not found');
 
     const currentStock = Number(item.stockQuantity || 0);
     const nextSoldQuantity = (item.soldQuantity || 0) + quantity;
+    let nextStock = currentStock;
 
     if (currentStock > 0) {
       if (quantity > currentStock) {
         throw new BadRequestException('Dispensed quantity exceeds available stock');
       }
-      item.stockQuantity = currentStock - quantity;
+      nextStock = currentStock - quantity;
     }
 
-    item.soldQuantity = nextSoldQuantity;
-    await item.save();
+    const updated = await this.prisma.priceItem.update({
+      where: { id },
+      data: {
+        stockQuantity: nextStock,
+        soldQuantity: nextSoldQuantity
+      }
+    });
+
     await this.recalculateAllSummaries();
-    return item;
+    return updated;
   }
 
   async remove(id: string) {
-    const doc = await this.priceItemModel.findByIdAndDelete(id);
+    const doc = await this.prisma.priceItem.delete({ where: { id } }).catch(() => null);
     if (!doc) throw new NotFoundException('Price item not found');
     await this.recalculateAllSummaries();
     return { ok: true };
@@ -173,18 +175,17 @@ export class PriceListService implements OnModuleInit {
     const fromRange = this.monthRange(fromMonth);
     const toRange = this.monthRange(toMonth);
 
-    const source = await this.priceItemModel
-      .find({ createdAt: { $gte: fromRange.start, $lt: fromRange.end } })
-      .lean()
-      .exec();
+    const source = await this.prisma.priceItem.findMany({
+      where: { createdAt: { gte: fromRange.start, lt: fromRange.end } }
+    });
 
     if (!source.length) {
       throw new BadRequestException(`No price list items found for ${fromMonth}`);
     }
 
-    const existingTargetCount = await this.priceItemModel
-      .countDocuments({ createdAt: { $gte: toRange.start, $lt: toRange.end } })
-      .exec();
+    const existingTargetCount = await this.prisma.priceItem.count({
+      where: { createdAt: { gte: toRange.start, lt: toRange.end } }
+    });
 
     if (existingTargetCount > 0 && !input.overwrite) {
       throw new BadRequestException(`Target month ${toMonth} already has ${existingTargetCount} items`);
@@ -192,8 +193,10 @@ export class PriceListService implements OnModuleInit {
 
     let deletedCount = 0;
     if (existingTargetCount > 0 && input.overwrite) {
-      const del = await this.priceItemModel.deleteMany({ createdAt: { $gte: toRange.start, $lt: toRange.end } }).exec();
-      deletedCount = Number((del as any).deletedCount || 0);
+      const del = await this.prisma.priceItem.deleteMany({
+        where: { createdAt: { gte: toRange.start, lt: toRange.end } }
+      });
+      deletedCount = del.count;
     }
 
     const resetSold = input.resetSoldQuantity ?? true;
@@ -214,7 +217,7 @@ export class PriceListService implements OnModuleInit {
       updatedAt: now,
     }));
 
-    const inserted = await this.priceItemModel.insertMany(docs, { ordered: true } as any);
+    await this.prisma.priceItem.createMany({ data: docs });
     await this.recalculateAllSummaries();
     return {
       ok: true,
@@ -222,7 +225,7 @@ export class PriceListService implements OnModuleInit {
       toMonth,
       sourceCount: source.length,
       deletedCount,
-      createdCount: inserted.length,
+      createdCount: docs.length,
     };
   }
 
@@ -297,27 +300,25 @@ export class PriceListService implements OnModuleInit {
   private async ensureUniqueBedWard(name: string, currentId?: string) {
     const key = this.extractBedWardKey(name);
     if (!key) return;
-    const list = await this.priceItemModel
-      .find({ category: { $regex: /^bed$/i } })
-      .select({ _id: 1, name: 1 })
-      .lean()
-      .exec();
+    const list = await this.prisma.priceItem.findMany({
+      where: { category: { equals: 'bed', mode: 'insensitive' } },
+      select: { id: true, name: true }
+    });
     const conflict = list.find((it: any) => {
-      const id = String(it?._id || '');
-      if (currentId && id === String(currentId)) return false;
-      return this.extractBedWardKey(String(it?.name || '')) === key;
+      if (currentId && String(it.id) === String(currentId)) return false;
+      return this.extractBedWardKey(String(it.name || '')) === key;
     });
     if (conflict) {
       throw new BadRequestException(`Bed fee for ${key} already exists`);
     }
   }
 
-  async occupyBed(id: string, quantity: number): Promise<PriceItemDocument> {
+  async occupyBed(id: string, quantity: number): Promise<any> {
     const q = Number(quantity);
     if (!Number.isFinite(q) || !Number.isInteger(q) || q <= 0) {
       throw new BadRequestException('Quantity must be a positive integer');
     }
-    const item = await this.priceItemModel.findById(id);
+    const item = await this.prisma.priceItem.findUnique({ where: { id } });
     if (!item) throw new NotFoundException('Price item not found');
     if (String(item.category || '').trim().toLowerCase() !== 'bed') {
       throw new BadRequestException('Item is not a bed fee');
@@ -327,18 +328,20 @@ export class PriceListService implements OnModuleInit {
     const used = Number(item.soldQuantity || 0);
     const nextUsed = used + q;
     this.validateBedUsed(nextUsed, stock);
-    item.soldQuantity = nextUsed;
-    await item.save();
+    const updated = await this.prisma.priceItem.update({
+      where: { id },
+      data: { soldQuantity: nextUsed }
+    });
     await this.recalculateAllSummaries();
-    return item;
+    return updated;
   }
 
-  async releaseBed(id: string, quantity: number): Promise<PriceItemDocument> {
+  async releaseBed(id: string, quantity: number): Promise<any> {
     const q = Number(quantity);
     if (!Number.isFinite(q) || !Number.isInteger(q) || q <= 0) {
       throw new BadRequestException('Quantity must be a positive integer');
     }
-    const item = await this.priceItemModel.findById(id);
+    const item = await this.prisma.priceItem.findUnique({ where: { id } });
     if (!item) throw new NotFoundException('Price item not found');
     if (String(item.category || '').trim().toLowerCase() !== 'bed') {
       throw new BadRequestException('Item is not a bed fee');
@@ -348,10 +351,12 @@ export class PriceListService implements OnModuleInit {
     const used = Number(item.soldQuantity || 0);
     const nextUsed = used - q;
     this.validateBedUsed(nextUsed, stock);
-    item.soldQuantity = nextUsed;
-    await item.save();
+    const updated = await this.prisma.priceItem.update({
+      where: { id },
+      data: { soldQuantity: nextUsed }
+    });
     await this.recalculateAllSummaries();
-    return item;
+    return updated;
   }
 
   private calculateSummaryFromItems(items: any[], period: SummaryPeriod, referenceDate: string) {
@@ -452,8 +457,8 @@ export class PriceListService implements OnModuleInit {
   private invoiceTotal(inv: any) {
     const total = Number(inv?.totalCost ?? 0);
     if (Number.isFinite(total) && total > 0) return total;
-    const drugs = Array.isArray(inv?.drugs) ? inv.drugs : [];
-    const items = Array.isArray(inv?.items) ? inv.items : [];
+    const drugs = Array.isArray(inv?.drugs as any) ? (inv.drugs as any[]) : [];
+    const items = Array.isArray(inv?.items as any) ? (inv.items as any[]) : [];
     const drugsTotal = drugs.reduce((s: number, it: any) => s + (Number(it?.totalPrice) || 0), 0);
     const itemsTotal = items.reduce((s: number, it: any) => s + (Number(it?.totalPrice) || 0), 0);
     return drugsTotal + itemsTotal;
@@ -471,41 +476,39 @@ export class PriceListService implements OnModuleInit {
   private async getNHIAClearedValue(period: SummaryPeriod, referenceDate: string) {
     const { start, end } = this.getRange(period, referenceDate);
 
-    const stampedNoCopay = await this.invoices
-      .find({
-        billingRoute: BillingRoute.NHIA,
-        nhiaStampStatus: NHIAStampStatus.STAMPED,
-        patientAmountDue: { $lte: 0 },
-        $or: [
-          { nhiaStampedAt: { $gte: start, $lt: end } },
-          { nhiaStampedAt: { $exists: false }, updatedAt: { $gte: start, $lt: end } },
+    const stampedNoCopay = await this.prisma.invoice.findMany({
+      where: {
+        billingRoute: 'nhia',
+        nhiaStampStatus: 'stamped',
+        patientAmountDue: { lte: 0 },
+        OR: [
+          { nhiaStampedAt: { gte: start, lt: end } },
+          { updatedAt: { gte: start, lt: end } },
         ],
-      })
-      .select({ totalCost: 1, drugs: 1, items: 1, nhiaAmountDue: 1, patientAmountDue: 1 })
-      .lean()
-      .exec();
+      },
+      select: { totalCost: true, drugs: true, items: true, nhiaAmountDue: true, patientAmountDue: true }
+    });
 
-    const stampedWithCopay = await this.invoices
-      .find({
-        billingRoute: BillingRoute.NHIA,
-        nhiaStampStatus: NHIAStampStatus.STAMPED,
-        patientAmountDue: { $gt: 0 },
-        copayStatus: CopayStatus.PAID,
-        $or: [
-          { copayPaidAt: { $gte: start, $lt: end } },
-          { copayPaidAt: { $exists: false }, updatedAt: { $gte: start, $lt: end } },
+    const stampedWithCopay = await this.prisma.invoice.findMany({
+      where: {
+        billingRoute: 'nhia',
+        nhiaStampStatus: 'stamped',
+        patientAmountDue: { gt: 0 },
+        copayStatus: 'paid',
+        OR: [
+          { copayPaidAt: { gte: start, lt: end } },
+          { updatedAt: { gte: start, lt: end } },
         ],
-      })
-      .select({ totalCost: 1, drugs: 1, items: 1, nhiaAmountDue: 1, patientAmountDue: 1 })
-      .lean()
-      .exec();
+      },
+      select: { totalCost: true, drugs: true, items: true, nhiaAmountDue: true, patientAmountDue: true }
+    });
 
     return [...stampedNoCopay, ...stampedWithCopay].reduce((sum, inv) => sum + this.invoiceNHIAPortion(inv), 0);
   }
 
   private async recalculateAllSummaries() {
     try {
-      const items = await this.priceItemModel.find().lean().exec();
+      const items = await this.prisma.priceItem.findMany();
       const currentDate = new Date();
       const currentMonth = currentDate.toISOString().slice(0, 7);
       const currentYear = String(currentDate.getFullYear());
@@ -513,17 +516,17 @@ export class PriceListService implements OnModuleInit {
       const monthlySummary = this.calculateSummaryFromItems(items, 'monthly', currentMonth);
       const yearlySummary = this.calculateSummaryFromItems(items, 'yearly', currentYear);
 
-      await this.priceListSummaryModel.findOneAndUpdate(
-        { period: 'monthly', referenceDate: currentMonth },
-        monthlySummary,
-        { upsert: true, new: true }
-      );
+      await this.prisma.priceListSummary.upsert({
+        where: { period_referenceDate: { period: 'monthly', referenceDate: currentMonth } },
+        create: monthlySummary,
+        update: monthlySummary
+      });
 
-      await this.priceListSummaryModel.findOneAndUpdate(
-        { period: 'yearly', referenceDate: currentYear },
-        yearlySummary,
-        { upsert: true, new: true }
-      );
+      await this.prisma.priceListSummary.upsert({
+        where: { period_referenceDate: { period: 'yearly', referenceDate: currentYear } },
+        create: yearlySummary,
+        update: yearlySummary
+      });
     } catch (error) {
       console.error('[PriceListService] recalculateAllSummaries error:', error);
     }
@@ -534,7 +537,9 @@ export class PriceListService implements OnModuleInit {
     const ref = this.normalizeReferenceDate(period, referenceDate) || defaultRef;
 
     try {
-      const existingSummary = await this.priceListSummaryModel.findOne({ period, referenceDate: ref }).lean();
+      const existingSummary = await this.prisma.priceListSummary.findUnique({
+        where: { period_referenceDate: { period, referenceDate: ref } }
+      });
       const nhiaClearedValue = await this.getNHIAClearedValue(period, ref);
 
       if (existingSummary) {
@@ -556,9 +561,13 @@ export class PriceListService implements OnModuleInit {
         };
       }
 
-      const items = await this.priceItemModel.find().lean().exec();
+      const items = await this.prisma.priceItem.findMany();
       const calculated = this.calculateSummaryFromItems(items, period, ref);
-      const createdSummary = await this.priceListSummaryModel.create(calculated);
+      const createdSummary = await this.prisma.priceListSummary.upsert({
+        where: { period_referenceDate: { period, referenceDate: ref } },
+        create: calculated,
+        update: calculated
+      });
 
       return {
         period: createdSummary.period,
@@ -607,30 +616,25 @@ export class PriceListService implements OnModuleInit {
 
   async saveSummary(summaryData: any): Promise<any> {
     const { period, referenceDate, ...rest } = summaryData;
-    const filter: any = { period };
-    if (referenceDate) {
-      filter.referenceDate = referenceDate;
-    }
-    const summary = await this.priceListSummaryModel.findOneAndUpdate(
-      filter,
-      { period, referenceDate, ...rest },
-      { upsert: true, new: true }
-    );
-    return summary;
+    return this.prisma.priceListSummary.upsert({
+      where: { period_referenceDate: { period, referenceDate } },
+      create: { period, referenceDate, ...rest },
+      update: { period, referenceDate, ...rest }
+    });
   }
 
   async getTopSellingDrugs(opts?: { limit?: number; activeOnly?: boolean }) {
     const limit = Math.min(Math.max(Number(opts?.limit || 5), 1), 50);
-    const filter: any = { category: 'drug', soldQuantity: { $gt: 0 } };
+    const filter: any = { category: 'drug', soldQuantity: { gt: 0 } };
     if (opts?.activeOnly) filter.isActive = true;
-    const docs = await this.priceItemModel
-      .find(filter)
-      .sort({ soldQuantity: -1, name: 1 })
-      .limit(limit)
-      .lean()
-      .exec();
-    return docs.map((d: any) => ({
-      _id: String(d._id || ''),
+    const docs = await this.prisma.priceItem.findMany({
+      where: filter,
+      orderBy: [{ soldQuantity: 'desc' }, { name: 'asc' }],
+      take: limit
+    });
+    return docs.map((d) => ({
+      _id: d.id,
+      id: d.id,
       name: d.name || '',
       soldQuantity: Number(d.soldQuantity || 0),
       stockQuantity: Number(d.stockQuantity || 0),

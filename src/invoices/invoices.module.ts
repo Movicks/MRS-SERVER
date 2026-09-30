@@ -1,25 +1,16 @@
 import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
 import { CqrsModule } from '@nestjs/cqrs';
-import { Invoice, InvoiceSchema } from './invoice.schema';
-import { Patient, PatientSchema } from '../patients/patient.schema';
 import { InvoicesService } from './invoices.service';
 import { InvoicesController } from './invoices.controller';
+import { RealtimeModule } from '../realtime/realtime.module';
 import { EventsModule } from '../events/events.module';
-import { InvoiceCommandHandlers } from './cqrs/invoices.handlers';
 import { InvoicesReplayService } from './projection/invoices-replay.service';
+import { InvoiceCommandHandlers } from './cqrs/invoices.handlers';
 
 @Module({
-  imports: [
-    MongooseModule.forFeature([
-      { name: Invoice.name, schema: InvoiceSchema },
-      { name: Patient.name, schema: PatientSchema },
-    ]),
-    CqrsModule,
-    EventsModule
-  ],
+  imports: [CqrsModule, RealtimeModule, EventsModule],
   controllers: [InvoicesController],
-  providers: [InvoicesService, ...InvoiceCommandHandlers, InvoicesReplayService],
-  exports: [InvoicesService],
+  providers: [InvoicesService, InvoicesReplayService, ...InvoiceCommandHandlers],
+  exports: [InvoicesService, InvoicesReplayService],
 })
 export class InvoicesModule {}

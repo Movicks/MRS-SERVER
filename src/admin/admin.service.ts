@@ -1,89 +1,102 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { PrismaService } from '../prisma/prisma.service';
 import { PasswordService } from '../common/security/password';
-import { User, UserDocument } from '../users/schemas/user.schema';
-import { Admin, AdminDocument } from './schemas/admin.schema';
 import { UpdateUserDto } from '../users/dto/update-user.dto';
 
 @Injectable()
 export class AdminService {
   constructor(
-    @InjectModel(Admin.name) private readonly adminModel: Model<AdminDocument>,
-    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    private readonly prisma: PrismaService,
     private readonly passwordService: PasswordService
   ) {}
 
-  async create(dto: { name: string; email: string; password: string }): Promise<AdminDocument> {
-    const existsAdmin = await this.adminModel.findOne({ email: dto.email }).lean();
+  async create(dto: { name: string; email: string; password: string }): Promise<any> {
+    const email = dto.email.trim().toLowerCase();
+    const existsAdmin = await this.prisma.admin.findUnique({ where: { email } });
     if (existsAdmin) throw new ConflictException('Email already registered');
-    const existsUser = await this.userModel.findOne({ email: dto.email }).lean();
+    const existsUser = await this.prisma.user.findUnique({ where: { email } });
     if (existsUser) throw new ConflictException('Email already registered');
     const passwordHash = await this.passwordService.hash(dto.password);
-    const admin = new this.adminModel({
-      email: dto.email,
-      name: dto.name,
-      passwordHash,
-      roles: ['super_admin']
+    return this.prisma.admin.create({
+      data: {
+        email,
+        name: dto.name,
+        passwordHash,
+        roles: ['super_admin']
+      }
     });
-    return admin.save();
   }
 
-  async createAdminUser(dto: { name: string; email: string; password: string }): Promise<UserDocument> {
-    const existsAdmin = await this.adminModel.findOne({ email: dto.email }).lean();
+  async createAdminUser(dto: { name: string; email: string; password: string }): Promise<any> {
+    const email = dto.email.trim().toLowerCase();
+    const existsAdmin = await this.prisma.admin.findUnique({ where: { email } });
     if (existsAdmin) throw new ConflictException('Email already registered');
-    const existsUser = await this.userModel.findOne({ email: dto.email }).lean();
+    const existsUser = await this.prisma.user.findUnique({ where: { email } });
     if (existsUser) throw new ConflictException('Email already registered');
     const passwordHash = await this.passwordService.hash(dto.password);
-    const user = new this.userModel({
-      email: dto.email,
-      name: dto.name,
-      passwordHash,
-      roles: ['admin']
+    return this.prisma.user.create({
+      data: {
+        email,
+        name: dto.name,
+        passwordHash,
+        roles: ['admin']
+      }
     });
-    return user.save();
   }
 
   async adminExists(): Promise<boolean> {
-    const doc = await this.adminModel.findOne({}, { _id: 1 }).lean();
-    return !!doc;
+    const count = await this.prisma.admin.count();
+    return count > 0;
   }
 
-  async findByEmail(email: string): Promise<AdminDocument | null> {
-    return this.adminModel.findOne({ email });
+  async findByEmail(email: string): Promise<any | null> {
+    return this.prisma.admin.findUnique({ where: { email: email.trim().toLowerCase() } });
   }
 
-  async findById(id: string): Promise<AdminDocument | null> {
-    return this.adminModel.findById(id);
+  async findById(id: string): Promise<any | null> {
+    return this.prisma.admin.findUnique({ where: { id } });
   }
 
-  async validatePassword(admin: AdminDocument, plain: string): Promise<boolean> {
+  async validatePassword(admin: any, plain: string): Promise<boolean> {
     return this.passwordService.verify(plain, admin.passwordHash);
   }
 
   async setRefreshToken(adminId: string, tokenHash: string): Promise<void> {
-    await this.adminModel.findByIdAndUpdate(adminId, { refreshTokenHash: tokenHash });
+    await this.prisma.admin.update({
+      where: { id: adminId },
+      data: { refreshTokenHash: tokenHash }
+    });
   }
 
   async clearRefreshToken(adminId: string): Promise<void> {
-    await this.adminModel.findByIdAndUpdate(adminId, { $unset: { refreshTokenHash: '' } });
+    await this.prisma.admin.update({
+      where: { id: adminId },
+      data: { refreshTokenHash: null }
+    });
   }
 
-  async update(id: string, dto: UpdateUserDto): Promise<AdminDocument> {
-    const admin = await this.adminModel.findByIdAndUpdate(id, dto, { new: true });
-    if (!admin) throw new NotFoundException('Admin not found');
-    return admin;
+  async update(id: string, dto: UpdateUserDto): Promise<any> {
+    const exists = await this.prisma.admin.findUnique({ where: { id } });
+    if (!exists) throw new NotFoundException('Admin not found');
+    return this.prisma.admin.update({
+      where: { id },
+      data: dto as any
+    });
   }
 
   async changePassword(adminId: string, currentPassword: string, newPassword: string): Promise<void> {
-    const admin = await this.adminModel.findById(adminId);
+    const admin = await this.prisma.admin.findUnique({ where: { id: adminId } });
     if (!admin) throw new NotFoundException('Admin not found');
     const ok = await this.passwordService.verify(currentPassword, admin.passwordHash);
     if (!ok) throw new NotFoundException('Invalid current password');
     const hash = await this.passwordService.hash(newPassword);
-    admin.passwordHash = hash;
-    admin.passwordVersion = (admin.passwordVersion ?? 1) + 1;
-    admin.refreshTokenHash = undefined;
-    await admin.save();
+    await this.prisma.admin.update({
+      where: { id: adminId },
+      data: {
+        passwordHash: hash,
+        passwordVersion: (admin.passwordVersion ?? 1) + 1,
+        refreshTokenHash: null
+      }
+    });
   }
 }

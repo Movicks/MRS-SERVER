@@ -1,13 +1,11 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { DoctorReport, DoctorReportDocument } from './report.schema';
+import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 
 @Injectable()
 export class ReportService {
   constructor(
-    @InjectModel(DoctorReport.name) private readonly model: Model<DoctorReportDocument>,
+    private readonly prisma: PrismaService,
     private readonly usersService: UsersService
   ) {}
 
@@ -17,63 +15,76 @@ export class ReportService {
     }
     const sender = await this.usersService.findById(payload.senderId);
     const fallbackSenderName = String(payload.senderName || '').trim();
-    const doc = new this.model({
-      patientId: new Types.ObjectId(payload.patientId),
-      senderId: new Types.ObjectId(payload.senderId),
-      senderName: sender?.name || sender?.email || fallbackSenderName || '',
-      text: payload.text,
-      clinicalNote: payload.clinicalNote,
-      diagnosis: payload.diagnosis,
-      imageUrl: payload.imageUrl,
-      replyToId: payload.replyToId ? new Types.ObjectId(payload.replyToId) : undefined,
+    const saved = await this.prisma.doctorReport.create({
+      data: {
+        patientId: payload.patientId,
+        senderId: payload.senderId,
+        senderName: sender?.name || sender?.email || fallbackSenderName || '',
+        text: payload.text,
+        clinicalNote: payload.clinicalNote,
+        diagnosis: payload.diagnosis,
+        imageUrl: payload.imageUrl,
+        replyToId: payload.replyToId,
+      }
     });
-    const saved = await doc.save();
-    return this.mapReport(saved.toObject());
+    return this.mapReport(saved, sender);
   }
 
   async list(patientId: string) {
-    const pid = new Types.ObjectId(patientId);
-    const list = await this.model
-      .find({ patientId: pid })
-      .sort({ createdAt: -1 })
-      .populate('senderId', 'name email')
-      .lean();
-    return list.map((r: any) => this.mapReport(r));
+    const list = await this.prisma.doctorReport.findMany({
+      where: { patientId },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    const senderIds = Array.from(new Set(list.map((r) => r.senderId).filter(Boolean)));
+    const senders = await this.prisma.user.findMany({
+      where: { id: { in: senderIds } },
+      select: { id: true, name: true, email: true }
+    });
+    const senderMap = new Map<string, any>();
+    for (const s of senders) senderMap.set(s.id, s);
+
+    return list.map((r) => this.mapReport(r, senderMap.get(r.senderId)));
   }
 
   async update(id: string, payload: { text?: string; clinicalNote?: string; diagnosis?: string; imageUrl?: string }) {
-    const _id = new Types.ObjectId(id);
     const update: any = {};
     if (payload.text !== undefined) update.text = payload.text;
     if (payload.clinicalNote !== undefined) update.clinicalNote = payload.clinicalNote;
     if (payload.diagnosis !== undefined) update.diagnosis = payload.diagnosis;
     if (payload.imageUrl !== undefined) update.imageUrl = payload.imageUrl;
-    const saved = await this.model.findByIdAndUpdate(_id, update, { new: true }).populate('senderId', 'name email').lean();
+    const saved = await this.prisma.doctorReport.update({
+      where: { id },
+      data: update
+    }).catch(() => null);
+
     if (!saved) throw new BadRequestException('Report not found');
-    return this.mapReport(saved);
+    const sender = await this.prisma.user.findUnique({
+      where: { id: saved.senderId },
+      select: { id: true, name: true, email: true }
+    });
+    return this.mapReport(saved, sender);
   }
 
   async remove(id: string) {
-    const _id = new Types.ObjectId(id);
-    const res = await this.model.findByIdAndDelete(_id).lean();
+    const res = await this.prisma.doctorReport.delete({ where: { id } }).catch(() => null);
     if (!res) throw new BadRequestException('Report not found');
     return { id };
   }
 
-  private mapReport(r: any) {
-    const populatedSender = r.senderId && typeof r.senderId === 'object' ? r.senderId : null;
-    const senderName = String(r.senderName ?? populatedSender?.name ?? populatedSender?.email ?? '').trim();
+  private mapReport(r: any, senderObj?: any) {
+    const senderName = String(r.senderName ?? senderObj?.name ?? senderObj?.email ?? '').trim();
     return {
-      id: String(r._id),
-      patientId: String(r.patientId),
-      senderId: String(populatedSender?._id || r.senderId),
+      id: r.id,
+      patientId: r.patientId,
+      senderId: r.senderId,
       senderName: senderName || 'Unknown',
       doctorName: senderName || 'Unknown',
       text: r.text,
       clinicalNote: r.clinicalNote || r.text,
       diagnosis: r.diagnosis,
       imageUrl: r.imageUrl,
-      replyToId: r.replyToId ? String(r.replyToId) : undefined,
+      replyToId: r.replyToId || undefined,
       createdAt: r.createdAt,
     };
   }

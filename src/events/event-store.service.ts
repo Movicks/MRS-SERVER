@@ -1,8 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import type { Model } from 'mongoose';
-import { EventRecord, EventRecordDocument } from './event-record.schema';
-import { EventSequence, EventSequenceDocument } from './event-sequence.schema';
+import { PrismaService } from '../prisma/prisma.service';
 
 export type AppendEventInput = {
   aggregateType: string;
@@ -16,34 +13,31 @@ export type AppendEventInput = {
 
 @Injectable()
 export class EventStoreService {
-  constructor(
-    @InjectModel(EventRecord.name) private readonly model: Model<EventRecordDocument>,
-    @InjectModel(EventSequence.name) private readonly seqModel: Model<EventSequenceDocument>
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   private async nextSeq(): Promise<number> {
-    const doc = await this.seqModel.findOneAndUpdate(
-      { name: 'event_store' },
-      { $inc: { value: 1 } },
-      { new: true, upsert: true }
-    );
-    return Number((doc as any).value || 0);
+    const seqDoc = await this.prisma.eventSequence.upsert({
+      where: { name: 'event_store' },
+      create: { name: 'event_store', value: 1 },
+      update: { value: { increment: 1 } }
+    });
+    return seqDoc.value;
   }
 
   async append(input: AppendEventInput) {
     const seq = await this.nextSeq();
-    const doc = new this.model({
-      seq,
-      aggregateType: input.aggregateType,
-      aggregateId: input.aggregateId,
-      eventType: input.eventType,
-      version: input.version,
-      occurredAt: input.occurredAt ?? new Date(),
-      payload: input.payload || {},
-      meta: input.meta || {}
+    return this.prisma.eventRecord.create({
+      data: {
+        seq,
+        aggregateType: input.aggregateType,
+        aggregateId: input.aggregateId,
+        eventType: input.eventType,
+        version: input.version,
+        occurredAt: input.occurredAt ?? new Date(),
+        payload: input.payload as any || {},
+        meta: input.meta as any || {}
+      }
     });
-    const saved = await doc.save();
-    return saved.toObject();
   }
 
   async list(filters?: {
@@ -61,19 +55,27 @@ export class EventStoreService {
     if (filters?.eventType) q.eventType = String(filters.eventType).trim();
     if (filters?.from || filters?.to) {
       const range: any = {};
-      if (filters.from) range.$gte = new Date(filters.from);
-      if (filters.to) range.$lte = new Date(filters.to);
+      if (filters.from) range.gte = new Date(filters.from);
+      if (filters.to) range.lte = new Date(filters.to);
       q.occurredAt = range;
     }
     const limit = Math.min(Math.max(Number(filters?.limit || 50), 1), 500);
     const skip = Math.max(Number(filters?.skip || 0), 0);
-    return this.model.find(q).sort({ occurredAt: -1 }).skip(skip).limit(limit).lean();
+    return this.prisma.eventRecord.findMany({
+      where: q,
+      orderBy: { occurredAt: 'desc' },
+      skip,
+      take: limit
+    });
   }
 
   async scan(filters?: { aggregateType?: string; eventType?: string }) {
     const q: any = {};
     if (filters?.aggregateType) q.aggregateType = String(filters.aggregateType).trim();
     if (filters?.eventType) q.eventType = String(filters.eventType).trim();
-    return this.model.find(q).sort({ seq: 1 }).lean();
+    return this.prisma.eventRecord.findMany({
+      where: q,
+      orderBy: { seq: 'asc' }
+    });
   }
 }

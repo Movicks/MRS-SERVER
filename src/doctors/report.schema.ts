@@ -1,33 +1,15 @@
-import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+export type DoctorReportDocument = DoctorReport;
 
-export type DoctorReportDocument = DoctorReport & Document;
-
-@Schema({ timestamps: true, collection: 'doctor_reports' })
 export class DoctorReport {
-  @Prop({ type: Types.ObjectId, ref: 'Patient', required: true })
-  patientId: Types.ObjectId;
-
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
-  senderId: Types.ObjectId;
-
-  @Prop({ trim: true, default: '' })
-  senderName: string;
-
-  @Prop({ trim: true })
+  id?: string;
+  patientId: string;
+  senderId: string;
+  senderName?: string;
   text?: string;
-
-  @Prop({ trim: true })
   clinicalNote?: string;
-
-  @Prop({ trim: true })
   diagnosis?: string;
-
-  @Prop({ trim: true })
   imageUrl?: string;
-
-  @Prop({ type: Types.ObjectId, ref: 'DoctorReport', required: false })
-  replyToId?: Types.ObjectId;
+  replyToId?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
-
-export const DoctorReportSchema = SchemaFactory.createForClass(DoctorReport);

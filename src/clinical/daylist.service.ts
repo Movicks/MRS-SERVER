@@ -1,17 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { VitalSign, VitalSignDocument } from '../gopd/vitals.schema';
-import { ClinicalDayList, ClinicalDayListDocument } from './daylist.schema';
+import { PrismaService } from '../prisma/prisma.service';
 
 type TargetDepartment = 'EarDoctor' | 'EyeDoctor';
 
 @Injectable()
 export class ClinicalDayListService {
-  constructor(
-    @InjectModel(ClinicalDayList.name) private readonly model: Model<ClinicalDayListDocument>,
-    @InjectModel(VitalSign.name) private readonly vitalsModel: Model<VitalSignDocument>
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   private normalizeTargetDepartment(v: string): TargetDepartment {
     const raw = String(v || '').trim().toLowerCase();
@@ -22,25 +16,29 @@ export class ClinicalDayListService {
 
   async add(patientId: string, targetDepartment: string, addedBy?: string, sourceDepartment?: string) {
     const target = this.normalizeTargetDepartment(targetDepartment);
-    const pid = new Types.ObjectId(patientId);
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const end = new Date(start);
     end.setDate(end.getDate() + 1);
-    const hasVitalsToday = await this.vitalsModel.exists({ patientId: pid, recordedAt: { $gte: start, $lt: end } });
-    if (!hasVitalsToday) throw new BadRequestException('Patient has no vitals recorded today');
-    const existing = await this.model
-      .findOne({ patientId: pid, targetDepartment: target, createdAt: { $gte: start, $lt: end } })
-      .lean();
-    if (existing) return existing;
-    const doc = new this.model({
-      patientId: pid,
-      targetDepartment: target,
-      addedBy: addedBy ? new Types.ObjectId(addedBy) : undefined,
-      sourceDepartment
+
+    const hasVitalsToday = await this.prisma.vitalSign.findFirst({
+      where: { patientId, recordedAt: { gte: start, lt: end } }
     });
-    const saved = await doc.save();
-    return saved.toObject();
+    if (!hasVitalsToday) throw new BadRequestException('Patient has no vitals recorded today');
+
+    const existing = await this.prisma.clinicalDayList.findFirst({
+      where: { patientId, targetDepartment: target, createdAt: { gte: start, lt: end } }
+    });
+    if (existing) return existing;
+
+    return this.prisma.clinicalDayList.create({
+      data: {
+        patientId,
+        targetDepartment: target,
+        addedBy,
+        sourceDepartment
+      }
+    });
   }
 
   async list(targetDepartment?: string, sourceDepartment?: string, range?: 'today' | 'all', start?: string, end?: string) {
@@ -50,30 +48,39 @@ export class ClinicalDayListService {
       const s = start ? new Date(start) : new Date(now.getFullYear(), now.getMonth(), now.getDate());
       const e = end ? new Date(end) : new Date(s);
       if (!end) e.setDate(e.getDate() + 1);
-      q.createdAt = { $gte: s, $lt: e };
+      q.createdAt = { gte: s, lt: e };
     }
     if (targetDepartment) q.targetDepartment = this.normalizeTargetDepartment(targetDepartment);
     if (sourceDepartment) q.sourceDepartment = sourceDepartment;
-    const docs = await this.model.find(q).populate('patientId').lean();
+
+    const docs = await this.prisma.clinicalDayList.findMany({ where: q });
+
+    const patientIds = Array.from(new Set(docs.map((d) => d.patientId).filter(Boolean)));
+    const patients = await this.prisma.patient.findMany({
+      where: { id: { in: patientIds } }
+    });
+    const patientMap = new Map<string, any>();
+    for (const p of patients) patientMap.set(p.id, p);
+
     const latestByPatientDept = new Map<string, any>();
-    for (const d of docs as any[]) {
-      const pid = String((d as any).patientId?._id || (d as any).patientId || '');
-      const td = String((d as any).targetDepartment || '');
+    for (const d of docs) {
+      const pid = d.patientId;
+      const td = String(d.targetDepartment || '');
       const key = `${pid}:${td}`;
       const prev = latestByPatientDept.get(key);
-      if (!prev || new Date((d as any).createdAt).getTime() > new Date((prev as any).createdAt).getTime()) {
+      if (!prev || new Date(d.createdAt).getTime() > new Date(prev.createdAt).getTime()) {
         latestByPatientDept.set(key, d);
       }
     }
     const deduped = Array.from(latestByPatientDept.values());
-    return deduped.map((d: any) => {
-      const p = d.patientId || {};
+    return deduped.map((d) => {
+      const p = patientMap.get(d.patientId) || {};
       const fullName = [p.surname, p.firstname, p.middlename].filter(Boolean).join(' ');
       const phone = p.phone || '';
       const cardNumber = p.veteran ? (p.serviceNumber || '') : (p.membershipNumber || '');
       const rank = p.rank || '';
       return {
-        patientId: String(d.patientId?._id || d.patientId || ''),
+        patientId: d.patientId,
         fullName,
         phone,
         cardNumber,
@@ -85,4 +92,3 @@ export class ClinicalDayListService {
     });
   }
 }
-

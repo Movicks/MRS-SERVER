@@ -1,11 +1,9 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { VitalSign, VitalSignDocument } from './vitals.schema';
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class VitalsService {
-  constructor(@InjectModel(VitalSign.name) private readonly model: Model<VitalSignDocument>) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async create(payload: {
     patientId: string;
@@ -20,29 +18,30 @@ export class VitalsService {
     height?: number;
     weight?: number;
   }) {
-    const patientId = new Types.ObjectId(payload.patientId);
-    const recordedBy = payload.recordedBy ? new Types.ObjectId(payload.recordedBy) : undefined;
     const recordedAt = payload.recordedAt ? new Date(payload.recordedAt) : new Date();
-    const doc = new this.model({
-      patientId,
-      recordedBy,
-      recordedAt,
-      temperature: payload.temperature,
-      pulse: payload.pulse,
-      respirationRate: payload.respirationRate,
-      bp: payload.bp,
-      spo2: payload.spo2,
-      fbsRbs: payload.fbsRbs,
-      height: payload.height,
-      weight: payload.weight,
+    const saved = await this.prisma.vitalSign.create({
+      data: {
+        patientId: payload.patientId,
+        recordedBy: payload.recordedBy,
+        recordedAt,
+        temperature: payload.temperature,
+        pulse: payload.pulse,
+        respirationRate: payload.respirationRate,
+        bp: payload.bp,
+        spo2: payload.spo2,
+        fbsRbs: payload.fbsRbs,
+        height: payload.height,
+        weight: payload.weight,
+      }
     });
-    const saved = await doc.save();
-    return this.mapWithYMD(saved.toObject());
+    return this.mapWithYMD(saved);
   }
 
   async listForPatient(patientId: string) {
-    const pid = new Types.ObjectId(patientId);
-    const list = await this.model.find({ patientId: pid }).sort({ recordedAt: -1 }).lean();
+    const list = await this.prisma.vitalSign.findMany({
+      where: { patientId },
+      orderBy: { recordedAt: 'desc' }
+    });
     return list.map(this.mapWithYMD);
   }
 

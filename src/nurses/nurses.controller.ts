@@ -1,18 +1,19 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Inject, Query, UseGuards, forwardRef } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import type { Role } from '../common/types/roles';
 import { UsersService } from '../users/users.service';
-import { Injectable } from '@nestjs/common';
 
 @ApiTags('staff')
 @ApiBearerAuth()
 @Controller({ path: 'nurses', version: '1' })
-@Injectable()
 export class NursesController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    @Inject(forwardRef(() => UsersService))
+    private readonly usersService: UsersService
+  ) {}
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('super_admin' as Role, 'admin' as Role, 'recording' as Role)

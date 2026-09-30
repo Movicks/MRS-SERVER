@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Inject, Query, UseGuards, forwardRef } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -10,7 +10,10 @@ import { UsersService } from '../users/users.service';
 @ApiBearerAuth()
 @Controller({ path: 'staff', version: '1' })
 export class StaffController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    @Inject(forwardRef(() => UsersService))
+    private readonly usersService: UsersService
+  ) {}
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('super_admin' as Role, 'admin' as Role, 'recording' as Role)

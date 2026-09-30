@@ -1,44 +1,35 @@
 import { Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import type { Model } from 'mongoose';
+import { PrismaService } from '../../prisma/prisma.service';
 import { EventStoreService } from '../../events/event-store.service';
-import { Invoice, InvoiceDocument } from '../invoice.schema';
 
 @Injectable()
 export class InvoicesReplayService {
   constructor(
     private readonly events: EventStoreService,
-    @InjectModel(Invoice.name) private readonly invoiceModel: Model<InvoiceDocument>
+    private readonly prisma: PrismaService
   ) {}
 
   async rebuildFromEvents() {
-    await this.invoiceModel.deleteMany({});
+    await this.prisma.invoice.deleteMany({});
     const stream = await this.events.scan({ aggregateType: 'Invoice' });
     for (const e of stream as any[]) {
-      if (e.eventType === 'InvoiceCreated') {
-        const invoice = (e.payload || {}).invoice;
-        if (!invoice?._id) continue;
-        await this.invoiceModel.updateOne({ _id: invoice._id }, { $set: invoice }, { upsert: true });
-      } else if (e.eventType === 'InvoicePaymentStatusUpdated') {
-        const invoice = (e.payload || {}).invoice;
-        if (!invoice?._id) continue;
-        await this.invoiceModel.updateOne({ _id: invoice._id }, { $set: invoice }, { upsert: true });
-      } else if (e.eventType === 'InvoiceNHIAStamped') {
-        const invoice = (e.payload || {}).invoice;
-        if (!invoice?._id) continue;
-        await this.invoiceModel.updateOne({ _id: invoice._id }, { $set: invoice }, { upsert: true });
-      } else if (e.eventType === 'InvoiceNHIACopayPaid') {
-        const invoice = (e.payload || {}).invoice;
-        if (!invoice?._id) continue;
-        await this.invoiceModel.updateOne({ _id: invoice._id }, { $set: invoice }, { upsert: true });
-      } else if (e.eventType === 'InvoiceItemsUpdated') {
-        const invoice = (e.payload || {}).invoice;
-        if (!invoice?._id) continue;
-        await this.invoiceModel.updateOne({ _id: invoice._id }, { $set: invoice }, { upsert: true });
-      } else if (e.eventType === 'InvoiceCanceled') {
-        const invoice = (e.payload || {}).invoice;
-        if (!invoice?._id) continue;
-        await this.invoiceModel.updateOne({ _id: invoice._id }, { $set: invoice }, { upsert: true });
+      const invoice = (e.payload || {}).invoice;
+      if (!invoice?.id && !invoice?._id) continue;
+      const id = String(invoice.id || invoice._id);
+      const { _id, ...invoiceData } = invoice;
+      if ([
+        'InvoiceCreated',
+        'InvoicePaymentStatusUpdated',
+        'InvoiceNHIAStamped',
+        'InvoiceNHIACopayPaid',
+        'InvoiceItemsUpdated',
+        'InvoiceCanceled'
+      ].includes(e.eventType)) {
+        await this.prisma.invoice.upsert({
+          where: { id },
+          create: { id, ...invoiceData },
+          update: invoiceData
+        });
       }
     }
     return { ok: true };

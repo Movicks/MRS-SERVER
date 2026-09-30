@@ -3,20 +3,459 @@ generator client {
 }
 
 datasource db {
-  provider = "mongodb"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 model User {
-  id                String   @id @map("_id") @db.ObjectId
+  id                String    @id @default(uuid())
+  email             String    @unique
+  name              String
+  imageUrl          String?
+  phone             String?
+  address           String?
+  country           String?
+  state             String?
+  department        String?
+  emergencyPhone    String?
+  passwordHash      String
+  passwordVersion   Int       @default(1)
+  roles             String[]  @default(["patient"])
+  refreshTokenHash  String?
+  failedLoginCount  Int       @default(0)
+  lastLoginAt       DateTime?
+  suspended         Boolean   @default(false)
+  doctor            Json?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([email])
+  @@map("users")
+}
+
+model Admin {
+  id                String   @id @default(uuid())
   email             String   @unique
   name              String
+  imageUrl          String?
+  phone             String?
+  address           String?
+  country           String?
+  state             String?
+  emergencyPhone    String?
   passwordHash      String
   passwordVersion   Int      @default(1)
-  roles             String[] @default(["patient"])
+  roles             String[] @default(["super_admin"])
   refreshTokenHash  String?
-  failedLoginCount  Int      @default(0)
-  lastLoginAt       DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  @@map("users")
+  @@index([email])
+  @@map("admins")
+}
+
+model DoctorProfile {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  passwordHash      String?
+  passwordVersion   Int?     @default(1)
+  refreshTokenHash  String?
+  personalInfo      Json
+  qualifications    Json?
+  experience        Json?
+  cme               Json?
+  skills            Json?
+  health            Json?
+  legal             Json?
+  statement         Json?
+  documents         Json?
+  stepsCompleted    Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([userId])
+  @@map("doctor_profiles")
+}
+
+model Invitation {
+  id          String    @id @default(uuid())
+  email       String
+  role        String    @default("doctor")
+  token       String    @unique
+  status      String    @default("pending")
+  invitedBy   String?
+  acceptedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([token])
+  @@index([email])
+  @@index([status])
+  @@map("invitations")
+}
+
+model Patient {
+  id                String    @id @default(uuid())
+  surname           String
+  firstname         String
+  middlename        String?
+  veteran           Boolean   @default(false)
+  serviceNumber     String?
+  rank              String?
+  membershipNumber  String?
+  sex               String
+  age               Int?
+  dateOfBirth       String?
+  country           String?
+  stateOfOrigin     String?
+  lga               String?
+  address           String?
+  religion          String?
+  maritalStatus     String?
+  phone             String?
+  occupation        String?
+  genotype          String?
+  bloodGroup        String?
+  patientStatus     String?   @default("active")
+  patientQueue      String?
+  nhiaStatus        String?   @default("")
+  nhiaUpdatedAt     DateTime?
+  nok               Json?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([surname, firstname])
+  @@index([serviceNumber])
+  @@index([membershipNumber])
+  @@index([patientStatus])
+  @@index([patientQueue])
+  @@map("patients")
+}
+
+model PharmacyPatient {
+  id           String   @id @default(uuid())
+  patientId    String   @unique
+  deskState    String   @default("awaiting-dispense")
+  prescription String?
+  drugs        Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([patientId])
+  @@index([deskState])
+  @@map("pharmacy_patients")
+}
+
+model VitalSign {
+  id              String   @id @default(uuid())
+  patientId       String
+  recordedBy      String?
+  recordedAt      DateTime
+  temperature     Float?
+  pulse           Float?
+  respirationRate Float?
+  bp              String?
+  spo2            Float?
+  fbsRbs          String?
+  height          Float?
+  weight          Float?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([patientId])
+  @@index([recordedAt])
+  @@map("gopd_vitals")
+}
+
+model GopdQueue {
+  id         String   @id @default(uuid())
+  patientId  String   @unique
+  category   String?
+  cardNumber String?
+  fullName   String?
+  phone      String?
+  rank       String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([patientId])
+  @@index([category])
+  @@map("gopd_queue")
+}
+
+model Department {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  bedCapacity Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([name])
+  @@map("departments")
+}
+
+model DutyRecord {
+  id               String   @id @default(uuid())
+  doctorUserId     String?
+  nurseUserId      String?
+  recordingUserId  String?
+  radiologyUserId  String?
+  departmentId     String
+  date             DateTime
+  shift            String
+  timeIn           DateTime
+  timeOut          DateTime
+  status           String
+  assignedBy       String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([doctorUserId, date, shift])
+  @@index([nurseUserId, date, shift])
+  @@index([recordingUserId, date, shift])
+  @@index([radiologyUserId, date, shift])
+  @@index([departmentId, date])
+  @@index([date])
+  @@map("duties")
+}
+
+model DoctorDayList {
+  id               String   @id @default(uuid())
+  patientId        String
+  addedBy          String?
+  sourceDepartment String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([patientId])
+  @@index([createdAt])
+  @@map("doctor_daylist")
+}
+
+model DoctorReport {
+  id           String   @id @default(uuid())
+  patientId    String
+  senderId     String
+  senderName   String   @default("")
+  text         String?
+  clinicalNote String?
+  diagnosis    String?
+  imageUrl     String?
+  replyToId    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([patientId])
+  @@index([senderId])
+  @@index([replyToId])
+  @@map("doctor_reports")
+}
+
+model ClinicalDayList {
+  id               String   @id @default(uuid())
+  patientId        String
+  addedBy          String?
+  sourceDepartment String?
+  targetDepartment String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([patientId, targetDepartment, createdAt])
+  @@index([targetDepartment])
+  @@map("clinical_daylist")
+}
+
+model LabReferral {
+  id                  String    @id @default(uuid())
+  patientId           String
+  senderId            String
+  invoiceId           String?
+  date                DateTime
+  serviceNoOrUUID     String?
+  rank                String?
+  forenames           String?
+  surname             String?
+  wardNo              String?
+  hospitalUnit        String?
+  age                 String?
+  to                  String?
+  specimen            String?
+  examinationRequired String?
+  diagnosis           String?
+  statement           String?
+  previousReportNos   String?
+  previousReportDate  DateTime?
+  testResults         Json?
+  status              String    @default("PENDING")
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([patientId, date])
+  @@index([status])
+  @@index([invoiceId])
+  @@map("lab_referrals")
+}
+
+model XrayReferral {
+  id                  String    @id @default(uuid())
+  patientId           String
+  senderId            String
+  invoiceId           String?
+  date                DateTime
+  serviceNoOrUUID     String?
+  rank                String?
+  forenames           String?
+  surname             String?
+  wardNo              String?
+  hospitalUnit        String?
+  age                 String?
+  to                  String?
+  imagingArea         String?
+  examinationRequired String?
+  diagnosis           String?
+  statement           String?
+  previousReportNos   String?
+  previousReportDate  DateTime?
+  testResults         Json?
+  status              String    @default("PENDING")
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([patientId, date])
+  @@index([status])
+  @@index([invoiceId])
+  @@map("xray_referrals")
+}
+
+model PriceItem {
+  id            String   @id @default(uuid())
+  name          String
+  category      String
+  description   String   @default("")
+  unit          String   @default("per item")
+  price         Float
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  stockQuantity Int      @default(0)
+  soldQuantity  Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([category, isActive, name])
+  @@index([name])
+  @@map("price_list_items")
+}
+
+model PriceListSummary {
+  id                  String   @id @default(uuid())
+  period              String
+  referenceDate       String
+  totalItems          Int      @default(0)
+  activeItems         Int      @default(0)
+  drugs               Int      @default(0)
+  totalDrugs          Int      @default(0)
+  services            Int      @default(0)
+  servicesValue       Float    @default(0)
+  totalValue          Float    @default(0)
+  totalDrugsInStock   Int      @default(0)
+  totalDrugsSold      Int      @default(0)
+  totalDrugsSoldValue Float    @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([period, referenceDate])
+  @@map("price_list_summaries")
+}
+
+model Invoice {
+  id                   String    @id @default(uuid())
+  patientId            String
+  createdByUserId      String?
+  createdByRole        String?   @default("")
+  paidByUserId         String?
+  paidByRole           String?   @default("")
+  paidAt               DateTime?
+  patientName          String
+  patientCardNumber    String
+  drugs                Json?
+  items                Json?
+  totalCost            Float
+  billingRoute         String    @default("paypoint")
+  patientIsPersonnel   Boolean?  @default(false)
+  patientHasNHIAAccess Boolean?  @default(false)
+  patientCopayPercent  Float     @default(0)
+  patientCopayAmount   Float     @default(0)
+  patientAmountDue     Float     @default(0)
+  nhiaAmountDue        Float     @default(0)
+  copayStatus          String    @default("awaiting")
+  copayPaidAt          DateTime?
+  copayPaidByRole      String?   @default("")
+  copayPaidByUserId    String?
+  nhiaStampStatus      String    @default("awaiting")
+  nhiaStampedAt        DateTime?
+  nhiaStampedByRole    String?   @default("")
+  nhiaStampedByUserId  String?
+  paymentStatus        String    @default("awaiting")
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([patientId])
+  @@index([paymentStatus])
+  @@index([copayStatus])
+  @@index([nhiaStampStatus])
+  @@index([createdAt])
+  @@map("invoices")
+}
+
+model WardAdmission {
+  id                        String    @id @default(uuid())
+  patientId                 String
+  wardUnit                  String
+  bedPriceItemId            String?   @default("")
+  quantity                  Int       @default(1)
+  admittedAt                DateTime
+  admittedByUserId          String?
+  admittedByRole            String?   @default("")
+  status                    String    @default("admitted")
+  dischargedAt              DateTime?
+  dischargedByUserId        String?
+  dischargedByRole          String?   @default("")
+  pharmacyPrescription      String?   @default("")
+  medicationOrders          Json?
+  medicationAdministrations Json?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  @@index([patientId])
+  @@index([wardUnit])
+  @@index([status])
+  @@map("ward_admissions")
+}
+
+model EventRecord {
+  id            String   @id @default(uuid())
+  seq           Int      @unique
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  version       Int?
+  occurredAt    DateTime
+  payload       Json
+  meta          Json?
+  createdAt     DateTime @default(now())
+
+  @@index([seq])
+  @@index([aggregateType, aggregateId, occurredAt])
+  @@index([eventType, occurredAt])
+  @@map("event_store")
+}
+
+model EventSequence {
+  id    String @id @default(uuid())
+  name  String @unique
+  value Int    @default(0)
+
+  @@index([name])
+  @@map("event_sequences")
 }

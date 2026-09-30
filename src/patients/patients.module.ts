@@ -1,33 +1,18 @@
 import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
 import { CqrsModule } from '@nestjs/cqrs';
-import { Patient, PatientSchema } from './patient.schema';
-import { PharmacyPatient, PharmacyPatientSchema } from './pharmacy-patient.schema';
 import { PatientsService } from './patients.service';
 import { PatientsController } from './patients.controller';
 import { GopdModule } from '../gopd/gopd.module';
 import { RealtimeModule } from '../realtime/realtime.module';
-import { EventsModule } from '../events/events.module';
 import { InvoicesModule } from '../invoices/invoices.module';
-import { WardAdmission, WardAdmissionSchema } from '../wards/ward-admission.schema';
-import { PatientCommandHandlers } from './cqrs/patients.handlers';
+import { EventsModule } from '../events/events.module';
 import { PatientsReplayService } from './projection/patients-replay.service';
+import { PatientCommandHandlers } from './cqrs/patients.handlers';
 
 @Module({
-  imports: [
-    MongooseModule.forFeature([
-      { name: Patient.name, schema: PatientSchema },
-      { name: PharmacyPatient.name, schema: PharmacyPatientSchema },
-      { name: WardAdmission.name, schema: WardAdmissionSchema },
-    ]),
-    CqrsModule,
-    EventsModule,
-    InvoicesModule,
-    GopdModule,
-    RealtimeModule,
-  ],
-  providers: [PatientsService, ...PatientCommandHandlers, PatientsReplayService],
+  imports: [CqrsModule, GopdModule, RealtimeModule, InvoicesModule, EventsModule],
   controllers: [PatientsController],
-  exports: [PatientsService],
+  providers: [PatientsService, PatientsReplayService, ...PatientCommandHandlers],
+  exports: [PatientsService, PatientsReplayService],
 })
 export class PatientsModule {}
