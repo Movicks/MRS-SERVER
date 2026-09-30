@@ -1,24 +1,26 @@
 import { Controller, Get } from '@nestjs/common';
-import { InjectConnection } from '@nestjs/mongoose';
-import type { Connection } from 'mongoose';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Controller({ path: 'health', version: '1' })
 export class HealthController {
-  constructor(@InjectConnection() private readonly conn: Connection) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   @Get()
   async getHealth() {
-    const mongoUri = String(process.env.MONGO_URI || '').trim();
-    const useInMemoryRaw = String(process.env.USE_INMEMORY_MONGO || '').trim().toLowerCase();
-    const useInMemory = useInMemoryRaw === 'true' || useInMemoryRaw === '1' || useInMemoryRaw === 'yes' || useInMemoryRaw === '';
-    const usingInMemory = !mongoUri && useInMemory;
+    let dbOk = false;
+    try {
+      await this.prisma.$queryRaw`SELECT 1`;
+      dbOk = true;
+    } catch {
+      dbOk = false;
+    }
+
     return {
-      ok: true,
-      mongo: {
-        readyState: this.conn.readyState,
-        usingInMemory
+      ok: dbOk,
+      database: {
+        type: 'postgresql',
+        connected: dbOk
       }
     };
   }
 }
-

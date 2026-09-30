@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import * as Joi from 'joi';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -9,7 +8,6 @@ import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
-import { MongoMemoryServer } from 'mongodb-memory-server';
 import { AdminModule } from './admin/admin.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfileModule } from './profile/profile.module';
@@ -33,8 +31,6 @@ import { EventsModule } from './events/events.module';
 import { ClinicalModule } from './clinical/clinical.module';
 import { WardsModule } from './wards/wards.module';
 
-// import { AdminModule } from './admin/admin.module';
-
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -43,20 +39,12 @@ import { WardsModule } from './wards/wards.module';
         NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
         PORT: Joi.number().default(8000),
         CORS_ORIGIN: Joi.string().optional(),
-        USE_INMEMORY_MONGO: Joi.boolean().default(true),
-        MONGO_URI: Joi.string().when('USE_INMEMORY_MONGO', {
-          is: false,
-          then: Joi.string().required(),
-          otherwise: Joi.string().optional()
-        }),
-        PRISMA_ENABLED: Joi.boolean().default(false),
-        DATABASE_URL: Joi.string().optional(),
+        DATABASE_URL: Joi.string().required(),
         JWT_ACCESS_SECRET: Joi.string().required(),
         JWT_REFRESH_SECRET: Joi.string().required(),
         PEPPER_SECRET: Joi.string().required(),
         RATE_LIMIT_TTL: Joi.number().default(60),
-        RATE_LIMIT_LIMIT: Joi.number().default(100)
-        ,
+        RATE_LIMIT_LIMIT: Joi.number().default(100),
         MAIL_FROM: Joi.string().optional(),
         APP_NAME: Joi.string().optional(),
         FRONTEND_URL: Joi.string().optional(),
@@ -72,40 +60,23 @@ import { WardsModule } from './wards/wards.module';
         autoLogging: false
       }
     }),
-    MongooseModule.forRootAsync({
-      imports: [ConfigModule],
-      useFactory: async (config: ConfigService) => {
-        let uri = config.get<string>('MONGO_URI');
-        const useMemory =
-          config.get<string>('NODE_ENV') !== 'production' &&
-          config.get<boolean>('USE_INMEMORY_MONGO');
-        if ((!uri || uri.length === 0) && useMemory) {
-          const mongod = await MongoMemoryServer.create();
-          uri = mongod.getUri();
-        }
-        if (!uri || uri.length === 0) {
-          throw new Error('MONGO_URI is required (or set USE_INMEMORY_MONGO=true)');
-        }
-        return {
-          uri,
-          autoIndex: config.get<string>('NODE_ENV') !== 'production'
-        };
-      },
-      inject: [ConfigService]
-    }),
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: async (config: ConfigService) => ({
-        ttl: config.get<number>('RATE_LIMIT_TTL'),
-        limit: config.get<number>('RATE_LIMIT_LIMIT')
+        throttlers: [
+          {
+            ttl: (config.get<number>('RATE_LIMIT_TTL') ?? 60) * 1000,
+            limit: config.get<number>('RATE_LIMIT_LIMIT') ?? 100
+          }
+        ]
       }),
       inject: [ConfigService]
     }),
+    PrismaModule,
     UsersModule,
     AdminModule,
     AuthModule,
     ProfileModule,
-    PrismaModule,
     MailerModule,
     RealtimeModule,
     InvitationsModule,
@@ -130,8 +101,7 @@ import { WardsModule } from './wards/wards.module';
     {
       provide: APP_FILTER,
       useClass: HttpExceptionFilter
-    }
-    ,
+    },
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard

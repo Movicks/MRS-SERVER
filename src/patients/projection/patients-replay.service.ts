@@ -1,24 +1,19 @@
 import { Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import type { Model } from 'mongoose';
-import { Types } from 'mongoose';
+import { PrismaService } from '../../prisma/prisma.service';
 import { EventStoreService } from '../../events/event-store.service';
-import { Patient, PatientDocument } from '../patient.schema';
-import { PharmacyPatient, PharmacyPatientDocument } from '../pharmacy-patient.schema';
 import { GopdQueueService } from '../../gopd/gopd-queue.service';
 
 @Injectable()
 export class PatientsReplayService {
   constructor(
     private readonly events: EventStoreService,
-    @InjectModel(Patient.name) private readonly patientModel: Model<PatientDocument>,
-    @InjectModel(PharmacyPatient.name) private readonly pharmacyModel: Model<PharmacyPatientDocument>,
+    private readonly prisma: PrismaService,
     private readonly gopdQueue: GopdQueueService
   ) {}
 
   async rebuildFromEvents() {
-    await this.patientModel.deleteMany({});
-    await this.pharmacyModel.deleteMany({});
+    await this.prisma.patient.deleteMany({});
+    await this.prisma.pharmacyPatient.deleteMany({});
     const existing = await this.gopdQueue.list();
     await Promise.all(existing.map((e) => this.gopdQueue.remove(String((e as any).patientId))));
 
@@ -27,30 +22,40 @@ export class PatientsReplayService {
       if (ev.aggregateType === 'Patient') {
         if (ev.eventType === 'PatientCreated' || ev.eventType === 'PatientUpdated') {
           const patient = (ev.payload || {}).patient;
-          if (!patient?._id) continue;
-          await this.patientModel.updateOne({ _id: new Types.ObjectId(String(patient._id)) }, { $set: patient }, { upsert: true });
-          const pid = String(patient._id);
+          if (!patient?.id && !patient?._id) continue;
+          const pid = String(patient.id || patient._id);
+          const { _id, ...dataWithoutId } = patient;
+          await this.prisma.patient.upsert({
+            where: { id: pid },
+            create: { id: pid, ...dataWithoutId },
+            update: dataWithoutId
+          });
           if (patient.patientQueue === 'godp_vitals') {
-            await this.gopdQueue.ensureFromPatient(patient as any);
+            await this.gopdQueue.ensureFromPatient({ ...patient, id: pid } as any);
           } else {
             await this.gopdQueue.remove(pid);
           }
         } else if (ev.eventType === 'PatientDeleted') {
           const id = String((ev.payload || {}).patientId || ev.aggregateId || '');
           if (!id) continue;
-          await this.patientModel.deleteOne({ _id: new Types.ObjectId(id) });
-          await this.pharmacyModel.deleteOne({ patientId: new Types.ObjectId(id) });
+          await this.prisma.patient.delete({ where: { id } }).catch(() => null);
+          await this.prisma.pharmacyPatient.deleteMany({ where: { patientId: id } });
           await this.gopdQueue.remove(id);
         }
       } else if (ev.aggregateType === 'PharmacyPatient') {
         if (ev.eventType === 'PatientAddedToPharmacy' || ev.eventType === 'PharmacyDeskStateUpdated') {
           const pp = (ev.payload || {}).pharmacyPatient;
           if (!pp?.patientId) continue;
-          await this.pharmacyModel.updateOne({ patientId: new Types.ObjectId(String(pp.patientId)) }, { $set: pp }, { upsert: true });
+          const pid = String(pp.patientId);
+          const { _id, patientId, ...dataWithoutId } = pp;
+          await this.prisma.pharmacyPatient.upsert({
+            where: { patientId: pid },
+            create: { patientId: pid, ...dataWithoutId },
+            update: dataWithoutId
+          });
         }
       }
     }
     return { ok: true };
   }
 }
-

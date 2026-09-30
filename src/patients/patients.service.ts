@@ -1,83 +1,84 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { Patient, PatientDocument } from './patient.schema';
-import { PharmacyPatient, PharmacyPatientDocument } from './pharmacy-patient.schema';
+import { PrismaService } from '../prisma/prisma.service';
 import { GopdQueueService } from '../gopd/gopd-queue.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { InvoicesService } from '../invoices/invoices.service';
-import { WardAdmission, WardAdmissionDocument, WardAdmissionStatus } from '../wards/ward-admission.schema';
 
 @Injectable()
 export class PatientsService {
   constructor(
-    @InjectModel(Patient.name) private readonly model: Model<PatientDocument>,
-    @InjectModel(PharmacyPatient.name) private readonly pharmacyModel: Model<PharmacyPatientDocument>,
-    @InjectModel(WardAdmission.name) private readonly wardAdmissions: Model<WardAdmissionDocument>,
+    private readonly prisma: PrismaService,
     private readonly gopdQueue: GopdQueueService,
     private readonly rt: RealtimeGateway,
     private readonly invoices: InvoicesService,
   ) {}
 
-  async list(search?: string): Promise<PatientDocument[]> {
-    const q: any = {};
-    if (search && search.trim().length > 0) {
-      const s = new RegExp(search.trim(), 'i');
-      q.$or = [{ surname: s }, { firstname: s }, { lastname: s }, { phone: s }];
-    }
-    return this.model.find(q).lean();
+  async list(search?: string): Promise<any[]> {
+    const s = search?.trim();
+    if (!s) return this.prisma.patient.findMany();
+
+    return this.prisma.patient.findMany({
+      where: {
+        OR: [
+          { surname: { contains: s, mode: 'insensitive' } },
+          { firstname: { contains: s, mode: 'insensitive' } },
+          { middlename: { contains: s, mode: 'insensitive' } },
+          { phone: { contains: s, mode: 'insensitive' } },
+        ]
+      }
+    });
   }
 
-  async listPaypointReferred(search?: string): Promise<PatientDocument[]> {
-    const q: any = {
-      $or: [{ patientQueue: 'paypoint' }, { patientStatus: 'paypoint' }],
+  async listPaypointReferred(search?: string): Promise<any[]> {
+    const s = search?.trim();
+    const whereCondition: any = {
+      OR: [{ patientQueue: 'paypoint' }, { patientStatus: 'paypoint' }],
     };
 
-    if (search && search.trim().length > 0) {
-      const s = new RegExp(search.trim(), 'i');
-      q.$and = [
+    if (s) {
+      whereCondition.AND = [
         {
-          $or: [
-            { surname: s },
-            { firstname: s },
-            { middlename: s },
-            { serviceNumber: s },
-            { membershipNumber: s },
-            { phone: s },
+          OR: [
+            { surname: { contains: s, mode: 'insensitive' } },
+            { firstname: { contains: s, mode: 'insensitive' } },
+            { middlename: { contains: s, mode: 'insensitive' } },
+            { serviceNumber: { contains: s, mode: 'insensitive' } },
+            { membershipNumber: { contains: s, mode: 'insensitive' } },
+            { phone: { contains: s, mode: 'insensitive' } },
           ],
         },
       ];
     }
 
-    return this.model.find(q).lean();
+    return this.prisma.patient.findMany({ where: whereCondition });
   }
 
-  async listNHIAReferred(search?: string): Promise<PatientDocument[]> {
-    const q: any = {
-      $or: [
+  async listNHIAReferred(search?: string): Promise<any[]> {
+    const s = search?.trim();
+    const whereCondition: any = {
+      OR: [
         { patientQueue: 'nhia' },
         { patientStatus: 'nhia' },
-        { nhiaStatus: { $in: ['cleared', 'not_cleared'] } },
+        { nhiaStatus: { in: ['cleared', 'not_cleared'] } },
       ],
     };
 
-    if (search && search.trim().length > 0) {
-      const s = new RegExp(search.trim(), 'i');
-      q.$and = [
+    if (s) {
+      whereCondition.AND = [
         {
-          $or: [
-            { surname: s },
-            { firstname: s },
-            { middlename: s },
-            { serviceNumber: s },
-            { membershipNumber: s },
-            { phone: s },
+          OR: [
+            { surname: { contains: s, mode: 'insensitive' } },
+            { firstname: { contains: s, mode: 'insensitive' } },
+            { middlename: { contains: s, mode: 'insensitive' } },
+            { serviceNumber: { contains: s, mode: 'insensitive' } },
+            { membershipNumber: { contains: s, mode: 'insensitive' } },
+            { phone: { contains: s, mode: 'insensitive' } },
           ],
         },
       ];
     }
 
-    return this.model.find(q).lean();
+    return this.prisma.patient.findMany({ where: whereCondition });
   }
 
   async getNHIAStats() {
@@ -111,12 +112,12 @@ export class PatientsService {
     }
 
     const awaitingQuery: any = {
-      $or: [{ patientQueue: 'nhia' }, { patientStatus: 'nhia' }],
-      updatedAt: { $gte: start, $lt: end },
+      OR: [{ patientQueue: 'nhia' }, { patientStatus: 'nhia' }],
+      updatedAt: { gte: start, lt: end },
     };
 
-    const clearedQuery: any = { nhiaStatus: 'cleared', nhiaUpdatedAt: { $gte: start, $lt: end } };
-    const notClearedQuery: any = { nhiaStatus: 'not_cleared', nhiaUpdatedAt: { $gte: start, $lt: end } };
+    const clearedQuery: any = { nhiaStatus: 'cleared', nhiaUpdatedAt: { gte: start, lt: end } };
+    const notClearedQuery: any = { nhiaStatus: 'not_cleared', nhiaUpdatedAt: { gte: start, lt: end } };
 
     const [
       awaiting,
@@ -129,15 +130,15 @@ export class PatientsService {
       notClearedCivilian,
       notClearedPersonnel,
     ] = await Promise.all([
-      this.model.countDocuments(awaitingQuery),
-      this.model.countDocuments({ ...awaitingQuery, veteran: { $ne: true } }),
-      this.model.countDocuments({ ...awaitingQuery, veteran: true }),
-      this.model.countDocuments(clearedQuery),
-      this.model.countDocuments({ ...clearedQuery, veteran: { $ne: true } }),
-      this.model.countDocuments({ ...clearedQuery, veteran: true }),
-      this.model.countDocuments(notClearedQuery),
-      this.model.countDocuments({ ...notClearedQuery, veteran: { $ne: true } }),
-      this.model.countDocuments({ ...notClearedQuery, veteran: true }),
+      this.prisma.patient.count({ where: awaitingQuery }),
+      this.prisma.patient.count({ where: { ...awaitingQuery, veteran: false } }),
+      this.prisma.patient.count({ where: { ...awaitingQuery, veteran: true } }),
+      this.prisma.patient.count({ where: clearedQuery }),
+      this.prisma.patient.count({ where: { ...clearedQuery, veteran: false } }),
+      this.prisma.patient.count({ where: { ...clearedQuery, veteran: true } }),
+      this.prisma.patient.count({ where: notClearedQuery }),
+      this.prisma.patient.count({ where: { ...notClearedQuery, veteran: false } }),
+      this.prisma.patient.count({ where: { ...notClearedQuery, veteran: true } }),
     ]);
 
     return {
@@ -156,37 +157,32 @@ export class PatientsService {
   }
 
   async listPharmacyReferred(search?: string): Promise<any[]> {
-    const pipeline: any[] = [
-      {
-        $lookup: {
-          from: 'patients',
-          localField: 'patientId',
-          foreignField: '_id',
-          as: 'patient',
-        },
-      },
-      { $unwind: '$patient' },
-      { $replaceRoot: { newRoot: { $mergeObjects: ['$patient', { deskState: '$deskState', prescription: '$prescription', drugs: '$drugs' }] } } },
-    ];
-
-    if (search && search.trim().length > 0) {
-      const s = new RegExp(search.trim(), 'i');
-      pipeline.push({
-        $match: {
-          $or: [
-            { surname: s },
-            { firstname: s },
-            { middlename: s },
-            { serviceNumber: s },
-            { membershipNumber: s },
-            { phone: s },
-          ],
-        },
-      });
+    const s = search?.trim();
+    const whereCondition: any = {};
+    if (s) {
+      whereCondition.patient = {
+        OR: [
+          { surname: { contains: s, mode: 'insensitive' } },
+          { firstname: { contains: s, mode: 'insensitive' } },
+          { middlename: { contains: s, mode: 'insensitive' } },
+          { serviceNumber: { contains: s, mode: 'insensitive' } },
+          { membershipNumber: { contains: s, mode: 'insensitive' } },
+          { phone: { contains: s, mode: 'insensitive' } },
+        ]
+      };
     }
 
-    const base = await this.pharmacyModel.aggregate(pipeline);
-    const patientIds = Array.from(new Set((base as any[]).map((x) => String(x?._id || '')).filter(Boolean)));
+    const pharmacyRecords = await this.prisma.pharmacyPatient.findMany({
+      where: whereCondition,
+    });
+
+    const patientIds = Array.from(new Set(pharmacyRecords.map((x) => x.patientId).filter(Boolean)));
+    const patients = await this.prisma.patient.findMany({
+      where: { id: { in: patientIds } }
+    });
+    const patientMap = new Map<string, any>();
+    for (const p of patients) patientMap.set(p.id, p);
+
     const invoiceByPatientId = new Map<string, any>();
     await Promise.all(
       patientIds.map(async (pid) => {
@@ -195,14 +191,15 @@ export class PatientsService {
       })
     );
 
-    const admissions = await this.wardAdmissions
-      .find({ patientId: { $in: patientIds.map((id) => new Types.ObjectId(id)) }, status: WardAdmissionStatus.ADMITTED })
-      .lean();
+    const admissions = await this.prisma.wardAdmission.findMany({
+      where: { patientId: { in: patientIds }, status: 'admitted' }
+    });
     const admissionByPatientId = new Map<string, any>();
-    for (const a of admissions as any[]) admissionByPatientId.set(String(a.patientId), a);
+    for (const a of admissions) admissionByPatientId.set(a.patientId, a);
 
-    return (base as any[]).map((p) => {
-      const pid = String(p?._id || '');
+    return pharmacyRecords.map((pp) => {
+      const pid = pp.patientId;
+      const p = patientMap.get(pid) || {};
       const inv = invoiceByPatientId.get(pid) || null;
       const admission = admissionByPatientId.get(pid) || null;
 
@@ -219,18 +216,20 @@ export class PatientsService {
             ? paymentStatus === 'paid'
             : nhiaStampStatus === 'stamped' && (patientAmountDue <= 0 || copayStatus === 'paid');
 
-      const hasBed = (() => {
-        const drugs = Array.isArray(p?.drugs) ? (p.drugs as any[]) : [];
-        return drugs.some((d) => String(d?.dosage || '').toLowerCase() === 'bed fee' || String(d?.category || '').toLowerCase() === 'bed');
-      })();
+      const drugs = Array.isArray(pp.drugs as any) ? (pp.drugs as any[]) : [];
+      const hasBed = drugs.some((d) => String(d?.dosage || '').toLowerCase() === 'bed fee' || String(d?.category || '').toLowerCase() === 'bed');
 
       return {
         ...p,
+        _id: p.id,
+        deskState: pp.deskState,
+        prescription: pp.prescription,
+        drugs: pp.drugs,
         pharmacy: {
-          deskState: p?.deskState,
+          deskState: pp.deskState,
           cleared,
           hasInvoice: !!inv,
-          invoiceId: inv?._id ? String(inv._id) : '',
+          invoiceId: inv?.id ? String(inv.id) : '',
           billingRoute: route,
           paymentStatus,
           nhiaStampStatus,
@@ -241,32 +240,39 @@ export class PatientsService {
           hasBed,
           admitted: !!admission,
           admittedWardUnit: admission ? String(admission.wardUnit || '') : '',
-          admissionId: admission ? String(admission._id || '') : '',
+          admissionId: admission ? String(admission.id || '') : '',
         },
       };
     });
   }
 
-  async addToPharmacy(patientId: string, data?: { prescription?: string; drugs?: any[] }): Promise<PharmacyPatientDocument> {
-    const id = new Types.ObjectId(patientId);
-    const patient = await this.model.findById(id);
+  async addToPharmacy(patientId: string, data?: { prescription?: string; drugs?: any[] }): Promise<any> {
+    const patient = await this.prisma.patient.findUnique({ where: { id: patientId } });
     if (!patient) throw new NotFoundException('Patient not found');
-    const update: any = { patientId: id, deskState: 'awaiting-dispense' };
-    if (data?.prescription) update.prescription = data.prescription;
-    if (data?.drugs) update.drugs = data.drugs;
-    return this.pharmacyModel.findOneAndUpdate(
-      { patientId: id },
-      update,
-      { upsert: true, new: true },
-    );
+
+    const updateData: any = {
+      deskState: 'awaiting-dispense'
+    };
+    if (data?.prescription !== undefined) updateData.prescription = data.prescription;
+    if (data?.drugs !== undefined) updateData.drugs = data.drugs;
+
+    return this.prisma.pharmacyPatient.upsert({
+      where: { patientId },
+      create: {
+        patientId,
+        deskState: 'awaiting-dispense',
+        prescription: data?.prescription || '',
+        drugs: data?.drugs || []
+      },
+      update: updateData
+    });
   }
 
-  async updatePharmacyDeskState(patientId: string, deskState: string, data?: { prescription?: string; drugs?: any[] }): Promise<PharmacyPatientDocument> {
-    const id = new Types.ObjectId(patientId);
-    const before = await this.pharmacyModel.findOne({ patientId: id }).lean();
-    const update: any = { deskState };
-    if (data?.prescription !== undefined) update.prescription = data.prescription;
-    if (data?.drugs !== undefined) update.drugs = data.drugs;
+  async updatePharmacyDeskState(patientId: string, deskState: string, data?: { prescription?: string; drugs?: any[] }): Promise<any> {
+    const before = await this.prisma.pharmacyPatient.findUnique({ where: { patientId } });
+    const updateData: any = { deskState };
+    if (data?.prescription !== undefined) updateData.prescription = data.prescription;
+    if (data?.drugs !== undefined) updateData.drugs = data.drugs;
 
     const nextDrugs = Array.isArray(data?.drugs) ? data?.drugs : undefined;
     const beforeDrugs = Array.isArray((before as any)?.drugs) ? (before as any).drugs : [];
@@ -293,40 +299,43 @@ export class PatientsService {
       }
     }
 
-    const doc = await this.pharmacyModel.findOneAndUpdate(
-      { patientId: id },
-      update,
-      { new: true },
-    );
+    const doc = await this.prisma.pharmacyPatient.update({
+      where: { patientId },
+      data: updateData
+    }).catch(() => null);
+
     if (!doc) throw new NotFoundException('Pharmacy patient not found');
     return doc;
   }
 
-  async create(data: Partial<Patient>): Promise<PatientDocument> {
-    const doc = new this.model(data);
-    const saved = await doc.save();
+  async create(data: any): Promise<any> {
+    const saved = await this.prisma.patient.create({ data });
     this.rt.emit('patient.created', {
-      id: String(saved._id),
+      id: saved.id,
       patientStatus: saved.patientStatus,
       patientQueue: saved.patientQueue,
     });
     return saved;
   }
 
-  async findById(id: string): Promise<PatientDocument | null> {
-    return this.model.findById(id);
+  async findById(id: string): Promise<any | null> {
+    return this.prisma.patient.findUnique({ where: { id } });
   }
 
-  async update(id: string, patch: Partial<Patient>): Promise<PatientDocument> {
-    const before = await this.model.findById(id).lean();
-    const doc = await this.model.findByIdAndUpdate(id, patch, { new: true });
-    if (!doc) throw new NotFoundException('Patient not found');
+  async update(id: string, patch: any): Promise<any> {
+    const before = await this.prisma.patient.findUnique({ where: { id } });
+    if (!before) throw new NotFoundException('Patient not found');
 
-    const patientId = String(doc._id);
+    const doc = await this.prisma.patient.update({
+      where: { id },
+      data: patch
+    });
+
+    const patientId = doc.id;
     const inQueue = await this.gopdQueue.exists(patientId);
     if (doc.patientQueue === 'godp_vitals') {
       await this.gopdQueue.ensureFromPatient(doc);
-    } else if (inQueue || before?.patientQueue === 'godp_vitals') {
+    } else if (inQueue || before.patientQueue === 'godp_vitals') {
       await this.gopdQueue.remove(patientId);
     }
 
@@ -334,17 +343,19 @@ export class PatientsService {
       id: patientId,
       patientStatus: doc.patientStatus,
       patientQueue: doc.patientQueue,
-      previousPatientStatus: before?.patientStatus,
-      previousPatientQueue: before?.patientQueue,
+      previousPatientStatus: before.patientStatus,
+      previousPatientQueue: before.patientQueue,
     });
     return doc;
   }
 
   async remove(id: string): Promise<void> {
-    const res = await this.model.findByIdAndDelete(id);
-    if (!res) throw new NotFoundException('Patient not found');
+    const exists = await this.prisma.patient.findUnique({ where: { id } });
+    if (!exists) throw new NotFoundException('Patient not found');
+
+    const res = await this.prisma.patient.delete({ where: { id } });
     await this.gopdQueue.remove(id);
-    await this.pharmacyModel.deleteOne({ patientId: new Types.ObjectId(id) });
+    await this.prisma.pharmacyPatient.deleteMany({ where: { patientId: id } });
     this.rt.emit('patient.deleted', {
       id,
       patientStatus: res.patientStatus,
@@ -353,12 +364,12 @@ export class PatientsService {
   }
 
   async getNHIAAccess(patientId: string) {
-    const doc = await this.model.findById(patientId).lean();
+    const doc = await this.prisma.patient.findUnique({ where: { id: patientId } });
     if (!doc) throw new NotFoundException('Patient not found');
 
-    const statusRaw = String((doc as any).nhiaStatus || '').trim().toLowerCase();
-    const inDesk = String((doc as any).patientQueue || '').trim().toLowerCase() === 'nhia' || String((doc as any).patientStatus || '').trim().toLowerCase() === 'nhia';
-    const updatedAt = (doc as any).nhiaUpdatedAt || null;
+    const statusRaw = String(doc.nhiaStatus || '').trim().toLowerCase();
+    const inDesk = String(doc.patientQueue || '').trim().toLowerCase() === 'nhia' || String(doc.patientStatus || '').trim().toLowerCase() === 'nhia';
+    const updatedAt = doc.nhiaUpdatedAt || null;
 
     const status =
       statusRaw === 'cleared'
@@ -370,7 +381,7 @@ export class PatientsService {
             : 'unknown';
 
     return {
-      patientId: String((doc as any)._id || patientId),
+      patientId: doc.id,
       status,
       hasAccess: status === 'cleared',
       updatedAt

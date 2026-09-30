@@ -1,24 +1,28 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { execSync } from 'child_process';
 
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit {
+export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PrismaService.name);
+
   async onModuleInit() {
-    const enabled = String(process.env.PRISMA_ENABLED || '').trim().toLowerCase();
-    if (enabled !== 'true' && enabled !== '1' && enabled !== 'yes') return;
-    const url = process.env.DATABASE_URL;
-    if (!url) return;
-    const trimmed = url.trim();
-    if (!trimmed) return;
-    if (trimmed.startsWith('mongodb://') || trimmed.startsWith('mongodb+srv://')) {
+    try {
+      await this.$connect();
+    } catch (err: any) {
+      this.logger.warn('Database connection failed on startup. Attempting automatic database creation & migration...');
       try {
-        const u = new URL(trimmed);
-        const pathname = (u.pathname || '').trim();
-        if (!pathname || pathname === '/') return;
-      } catch {
-        return;
+        execSync('npx prisma db push', { stdio: 'inherit' });
+        await this.$connect();
+        this.logger.log('Database created and schema migrated successfully.');
+      } catch (pushErr) {
+        this.logger.error('Failed to automatically create or migrate database', pushErr);
+        throw err;
       }
     }
-    await this.$connect();
+  }
+
+  async onModuleDestroy() {
+    await this.$disconnect();
   }
 }

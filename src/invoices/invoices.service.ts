@@ -1,15 +1,32 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { BillingRoute, CopayStatus, Invoice, InvoiceDocument, NHIAStampStatus, PaymentStatus } from './invoice.schema';
-import { Patient, PatientDocument } from '../patients/patient.schema';
+import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+
+export enum PaymentStatus {
+  AWAITING = 'awaiting',
+  PAID = 'paid',
+  CANCELED = 'canceled',
+}
+
+export enum BillingRoute {
+  PAYPOINT = 'paypoint',
+  NHIA = 'nhia',
+}
+
+export enum NHIAStampStatus {
+  AWAITING = 'awaiting',
+  STAMPED = 'stamped',
+}
+
+export enum CopayStatus {
+  AWAITING = 'awaiting',
+  PAID = 'paid',
+}
 
 @Injectable()
 export class InvoicesService {
   constructor(
-    @InjectModel(Invoice.name) private readonly invoiceModel: Model<InvoiceDocument>,
-    @InjectModel(Patient.name) private readonly patientModel: Model<PatientDocument>,
+    private readonly prisma: PrismaService,
     private readonly rt: RealtimeGateway,
   ) {}
 
@@ -23,10 +40,10 @@ export class InvoicesService {
     billingRoute?: BillingRoute;
     nhiaStampStatus?: NHIAStampStatus;
     copayStatus?: CopayStatus;
-  }): Promise<InvoiceDocument[]> {
+  }): Promise<any[]> {
     const q: any = {};
     if (filters?.createdByRole) q.createdByRole = String(filters.createdByRole).trim();
-    if (filters?.createdByUserId) q.createdByUserId = new Types.ObjectId(filters.createdByUserId);
+    if (filters?.createdByUserId) q.createdByUserId = filters.createdByUserId;
     if (filters?.paymentStatus) q.paymentStatus = filters.paymentStatus;
     if (filters?.paidByRole) q.paidByRole = String(filters.paidByRole).trim();
     if (filters?.billingRoute) q.billingRoute = filters.billingRoute;
@@ -34,11 +51,14 @@ export class InvoicesService {
     if (filters?.copayStatus) q.copayStatus = filters.copayStatus;
     if (filters?.paidFrom || filters?.paidTo) {
       const range: any = {};
-      if (filters.paidFrom) range.$gte = new Date(filters.paidFrom);
-      if (filters.paidTo) range.$lt = new Date(filters.paidTo);
+      if (filters.paidFrom) range.gte = new Date(filters.paidFrom);
+      if (filters.paidTo) range.lt = new Date(filters.paidTo);
       q.paidAt = range;
     }
-    return this.invoiceModel.find(q).sort({ createdAt: -1 }).lean();
+    return this.prisma.invoice.findMany({
+      where: q,
+      orderBy: { createdAt: 'desc' }
+    });
   }
 
   private pickRole(rolesRaw: string[] | undefined, priority: string[]) {
@@ -58,9 +78,8 @@ export class InvoicesService {
     patientId: string,
     payload: { drugs?: any[]; items?: any[]; preferredBillingRoute?: BillingRoute },
     meta?: { createdByUserId?: string; roles?: string[] },
-  ): Promise<InvoiceDocument> {
-    const id = new Types.ObjectId(patientId);
-    const patient = await this.patientModel.findById(id);
+  ): Promise<any> {
+    const patient = await this.prisma.patient.findUnique({ where: { id: patientId } });
     if (!patient) throw new NotFoundException('Patient not found');
 
     const drugs = Array.isArray(payload.drugs) ? payload.drugs : [];
@@ -92,7 +111,7 @@ export class InvoicesService {
       invoiceDrugs.reduce((sum, d) => sum + (d.totalPrice || 0), 0) +
       invoiceItems.reduce((sum, d) => sum + (d.totalPrice || 0), 0);
 
-    const patientCardNumber = patient.serviceNumber || patient.membershipNumber || String(patient._id);
+    const patientCardNumber = patient.serviceNumber || patient.membershipNumber || patient.id;
     const patientName = [patient.surname, patient.firstname, patient.middlename].filter(Boolean).join(' ');
 
     const createdByRole = this.pickRole(meta?.roles, [
@@ -105,7 +124,7 @@ export class InvoicesService {
       'super_admin',
     ]);
 
-    const patientIsPersonnel = !!(patient as any).veteran;
+    const patientIsPersonnel = !!patient.veteran;
     const patientHasNHIAAccess = this.isNHIAAccess(patient);
     const defaultRoute: BillingRoute = patientIsPersonnel || patientHasNHIAAccess ? BillingRoute.NHIA : BillingRoute.PAYPOINT;
     const preferred = String(payload.preferredBillingRoute || '').trim().toLowerCase();
@@ -123,76 +142,79 @@ export class InvoicesService {
       throw new BadRequestException('Patient has no NHIA access');
     }
 
-    const invoice = new this.invoiceModel({
-      patientId: id,
-      createdByUserId: meta?.createdByUserId ? new Types.ObjectId(meta.createdByUserId) : undefined,
-      createdByRole,
-      patientName,
-      patientCardNumber,
-      drugs: invoiceDrugs,
-      items: invoiceItems,
-      totalCost,
-      billingRoute,
-      patientIsPersonnel,
-      patientHasNHIAAccess,
-      patientCopayPercent,
-      patientCopayAmount,
-      patientAmountDue,
-      nhiaAmountDue,
-      copayStatus: billingRoute === BillingRoute.NHIA && patientAmountDue === 0 ? CopayStatus.PAID : CopayStatus.AWAITING,
-      nhiaStampStatus: billingRoute === BillingRoute.NHIA ? NHIAStampStatus.AWAITING : NHIAStampStatus.AWAITING,
-      paymentStatus: billingRoute === BillingRoute.PAYPOINT ? PaymentStatus.AWAITING : PaymentStatus.AWAITING,
+    const saved = await this.prisma.invoice.create({
+      data: {
+        patientId,
+        createdByUserId: meta?.createdByUserId,
+        createdByRole,
+        patientName,
+        patientCardNumber,
+        drugs: invoiceDrugs as any,
+        items: invoiceItems as any,
+        totalCost,
+        billingRoute,
+        patientIsPersonnel,
+        patientHasNHIAAccess,
+        patientCopayPercent,
+        patientCopayAmount,
+        patientAmountDue,
+        nhiaAmountDue,
+        copayStatus: billingRoute === BillingRoute.NHIA && patientAmountDue === 0 ? CopayStatus.PAID : CopayStatus.AWAITING,
+        nhiaStampStatus: billingRoute === BillingRoute.NHIA ? NHIAStampStatus.AWAITING : NHIAStampStatus.AWAITING,
+        paymentStatus: billingRoute === BillingRoute.PAYPOINT ? PaymentStatus.AWAITING : PaymentStatus.AWAITING,
+      }
     });
 
-    const saved = await invoice.save();
-
     if (billingRoute === BillingRoute.NHIA) {
-      await this.patientModel.findByIdAndUpdate(
-        id,
-        { patientStatus: 'nhia', patientQueue: 'nhia' },
-        { new: false },
-      );
+      await this.prisma.patient.update({
+        where: { id: patientId },
+        data: { patientStatus: 'nhia', patientQueue: 'nhia' }
+      });
       this.rt.emit('patient.updated', {
-        id: String(id),
+        id: patientId,
         patientStatus: 'nhia',
         patientQueue: 'nhia',
       });
     }
 
     this.rt.emit('invoice.created', {
-      id: String(saved._id),
-      patientId: String(saved.patientId),
+      id: saved.id,
+      patientId: saved.patientId,
       paymentStatus: saved.paymentStatus,
       totalCost: saved.totalCost,
-      billingRoute: (saved as any).billingRoute,
+      billingRoute: saved.billingRoute,
     });
     return saved;
   }
 
-  async findByPatientId(patientId: string): Promise<InvoiceDocument[]> {
-    const id = new Types.ObjectId(patientId);
-    return this.invoiceModel.find({ patientId: id }).sort({ createdAt: -1 }).lean();
+  async findByPatientId(patientId: string): Promise<any[]> {
+    return this.prisma.invoice.findMany({
+      where: { patientId },
+      orderBy: { createdAt: 'desc' }
+    });
   }
 
   async findLatestByPatientId(patientId: string) {
-    const id = new Types.ObjectId(patientId);
-    return this.invoiceModel.findOne({ patientId: id }).sort({ createdAt: -1 }).lean();
+    return this.prisma.invoice.findFirst({
+      where: { patientId },
+      orderBy: { createdAt: 'desc' }
+    });
   }
 
-  async findOne(id: string): Promise<InvoiceDocument> {
-    const doc = await this.invoiceModel.findById(id);
+  async findOne(id: string): Promise<any> {
+    const doc = await this.prisma.invoice.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Invoice not found');
     return doc;
   }
 
-  async updatePaymentStatus(id: string, status: PaymentStatus, meta?: { userId?: string; roles?: string[] }): Promise<InvoiceDocument> {
-    const before = await this.invoiceModel.findById(id).lean();
+  async updatePaymentStatus(id: string, status: PaymentStatus, meta?: { userId?: string; roles?: string[] }): Promise<any> {
+    const before = await this.prisma.invoice.findUnique({ where: { id } });
     if (!before) throw new NotFoundException('Invoice not found');
-    if (String((before as any).billingRoute || '') === BillingRoute.NHIA) {
+    if (String(before.billingRoute || '') === BillingRoute.NHIA) {
       throw new BadRequestException('NHIA invoices cannot be paid via paypoint status');
     }
 
-    const update: any = { paymentStatus: status };
+    const updateData: any = { paymentStatus: status };
     if (status === PaymentStatus.PAID) {
       const paidByRole = this.pickRole(meta?.roles, [
         'paypoint',
@@ -203,32 +225,33 @@ export class InvoicesService {
         'admin',
         'super_admin',
       ]);
-      update.paidAt = new Date();
-      update.paidByRole = paidByRole;
-      update.paidByUserId = meta?.userId ? new Types.ObjectId(meta.userId) : undefined;
+      updateData.paidAt = new Date();
+      updateData.paidByRole = paidByRole;
+      updateData.paidByUserId = meta?.userId;
     } else {
-      update.paidAt = undefined;
-      update.paidByRole = '';
-      update.paidByUserId = undefined;
+      updateData.paidAt = null;
+      updateData.paidByRole = '';
+      updateData.paidByUserId = null;
     }
 
-    const doc = await this.invoiceModel.findByIdAndUpdate(id, update, { new: true });
-    if (!doc) throw new NotFoundException('Invoice not found');
+    const doc = await this.prisma.invoice.update({
+      where: { id },
+      data: updateData
+    });
     this.rt.emit('invoice.updated', {
-      id: String(doc._id),
-      patientId: String(doc.patientId),
+      id: doc.id,
+      patientId: doc.patientId,
       paymentStatus: doc.paymentStatus,
       totalCost: doc.totalCost,
-      billingRoute: (doc as any).billingRoute,
+      billingRoute: doc.billingRoute,
     });
     if (status === PaymentStatus.PAID) {
-      await this.patientModel.findByIdAndUpdate(
-        doc.patientId,
-        { patientStatus: 'ok', patientQueue: '' },
-        { new: false },
-      );
+      await this.prisma.patient.update({
+        where: { id: doc.patientId },
+        data: { patientStatus: 'ok', patientQueue: '' }
+      });
       this.rt.emit('patient.updated', {
-        id: String(doc.patientId),
+        id: doc.patientId,
         patientStatus: 'ok',
         patientQueue: '',
       });
@@ -237,78 +260,88 @@ export class InvoicesService {
   }
 
   async stampNHIA(id: string, meta?: { userId?: string; roles?: string[] }) {
-    const before = await this.invoiceModel.findById(id);
+    const before = await this.prisma.invoice.findUnique({ where: { id } });
     if (!before) throw new NotFoundException('Invoice not found');
-    if (String((before as any).billingRoute || '') !== BillingRoute.NHIA) {
+    if (String(before.billingRoute || '') !== BillingRoute.NHIA) {
       throw new BadRequestException('Invoice is not routed to NHIA');
     }
-    const due = Number((before as any).patientAmountDue || 0);
-    const copayStatus = String((before as any).copayStatus || '');
+    const due = Number(before.patientAmountDue || 0);
+    const copayStatus = String(before.copayStatus || '');
     if (due > 0 && copayStatus !== CopayStatus.PAID) {
       throw new BadRequestException('Awaiting 10% payment confirmation from paypoint');
     }
     const role = this.pickRole(meta?.roles, ['staff', 'admin', 'super_admin']);
-    before.nhiaStampStatus = NHIAStampStatus.STAMPED;
-    before.nhiaStampedAt = new Date();
-    before.nhiaStampedByRole = role;
-    before.nhiaStampedByUserId = meta?.userId ? new Types.ObjectId(meta.userId) : undefined;
-    const saved = await before.save();
+    const saved = await this.prisma.invoice.update({
+      where: { id },
+      data: {
+        nhiaStampStatus: NHIAStampStatus.STAMPED,
+        nhiaStampedAt: new Date(),
+        nhiaStampedByRole: role,
+        nhiaStampedByUserId: meta?.userId
+      }
+    });
     this.rt.emit('invoice.updated', {
-      id: String(saved._id),
-      patientId: String(saved.patientId),
+      id: saved.id,
+      patientId: saved.patientId,
       paymentStatus: saved.paymentStatus,
       totalCost: saved.totalCost,
-      billingRoute: (saved as any).billingRoute,
+      billingRoute: saved.billingRoute,
     });
     return saved;
   }
 
   async markCopayPaid(id: string, meta?: { userId?: string; roles?: string[] }) {
-    const before = await this.invoiceModel.findById(id);
+    const before = await this.prisma.invoice.findUnique({ where: { id } });
     if (!before) throw new NotFoundException('Invoice not found');
-    if (String((before as any).billingRoute || '') !== BillingRoute.NHIA) {
+    if (String(before.billingRoute || '') !== BillingRoute.NHIA) {
       throw new BadRequestException('Invoice is not routed to NHIA');
     }
-    if (Number((before as any).patientAmountDue || 0) <= 0) {
-      before.copayStatus = CopayStatus.PAID;
-      const saved0 = await before.save();
+    if (Number(before.patientAmountDue || 0) <= 0) {
+      const saved0 = await this.prisma.invoice.update({
+        where: { id },
+        data: { copayStatus: CopayStatus.PAID }
+      });
       this.rt.emit('invoice.updated', {
-        id: String(saved0._id),
-        patientId: String(saved0.patientId),
+        id: saved0.id,
+        patientId: saved0.patientId,
         paymentStatus: saved0.paymentStatus,
         totalCost: saved0.totalCost,
-        billingRoute: (saved0 as any).billingRoute,
+        billingRoute: saved0.billingRoute,
       });
       return saved0;
     }
     const role = this.pickRole(meta?.roles, ['staff', 'paypoint', 'admin', 'super_admin']);
-    before.copayStatus = CopayStatus.PAID;
-    before.copayPaidAt = new Date();
-    before.copayPaidByRole = role;
-    before.copayPaidByUserId = meta?.userId ? new Types.ObjectId(meta.userId) : undefined;
-    const saved = await before.save();
+    const saved = await this.prisma.invoice.update({
+      where: { id },
+      data: {
+        copayStatus: CopayStatus.PAID,
+        copayPaidAt: new Date(),
+        copayPaidByRole: role,
+        copayPaidByUserId: meta?.userId
+      }
+    });
     this.rt.emit('invoice.updated', {
-      id: String(saved._id),
-      patientId: String(saved.patientId),
+      id: saved.id,
+      patientId: saved.patientId,
       paymentStatus: saved.paymentStatus,
       totalCost: saved.totalCost,
-      billingRoute: (saved as any).billingRoute,
+      billingRoute: saved.billingRoute,
     });
     return saved;
   }
 
   async updateItems(id: string, items: any[], meta?: { userId?: string; roles?: string[] }) {
-    const doc = await this.invoiceModel.findById(id);
+    const doc = await this.prisma.invoice.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Invoice not found');
     if (doc.paymentStatus === PaymentStatus.CANCELED) {
       throw new BadRequestException('Invoice is canceled');
     }
 
-    const route = String((doc as any).billingRoute || '');
+    const route = String(doc.billingRoute || '');
     if (route === BillingRoute.PAYPOINT && doc.paymentStatus === PaymentStatus.PAID) {
       throw new BadRequestException('Paid invoices cannot be modified');
     }
-    if (route === BillingRoute.NHIA && String((doc as any).nhiaStampStatus || '') === NHIAStampStatus.STAMPED) {
+    if (route === BillingRoute.NHIA && String(doc.nhiaStampStatus || '') === NHIAStampStatus.STAMPED) {
       throw new BadRequestException('Stamped NHIA invoices cannot be modified');
     }
 
@@ -323,13 +356,13 @@ export class InvoicesService {
       totalPrice: (item.unitPrice || 0) * item.quantity,
     }));
 
-    const invoiceDrugs = Array.isArray((doc as any).drugs) ? (doc as any).drugs : [];
+    const invoiceDrugs = Array.isArray(doc.drugs as any) ? (doc.drugs as any[]) : [];
     const drugsTotal = invoiceDrugs.reduce((sum: number, d: any) => sum + (Number(d.totalPrice || 0) || 0), 0);
     const itemsTotal = invoiceItems.reduce((sum, d) => sum + (Number(d.totalPrice || 0) || 0), 0);
     const totalCost = drugsTotal + itemsTotal;
 
-    const patientIsPersonnel = !!(doc as any).patientIsPersonnel;
-    const patientHasNHIAAccess = !!(doc as any).patientHasNHIAAccess;
+    const patientIsPersonnel = !!doc.patientIsPersonnel;
+    const patientHasNHIAAccess = !!doc.patientHasNHIAAccess;
 
     if (route === BillingRoute.NHIA && !patientIsPersonnel && !patientHasNHIAAccess) {
       throw new BadRequestException('Patient has no NHIA access');
@@ -340,88 +373,96 @@ export class InvoicesService {
     const patientAmountDue = route === BillingRoute.NHIA ? patientCopayAmount : totalCost;
     const nhiaAmountDue = route === BillingRoute.NHIA ? Math.max(0, totalCost - patientCopayAmount) : 0;
 
-    doc.items = invoiceItems as any;
-    doc.totalCost = totalCost;
-    (doc as any).patientCopayPercent = patientCopayPercent;
-    (doc as any).patientCopayAmount = patientCopayAmount;
-    (doc as any).patientAmountDue = patientAmountDue;
-    (doc as any).nhiaAmountDue = nhiaAmountDue;
+    const updateData: any = {
+      items: invoiceItems as any,
+      totalCost,
+      patientCopayPercent,
+      patientCopayAmount,
+      patientAmountDue,
+      nhiaAmountDue,
+    };
 
     if (route === BillingRoute.NHIA) {
       if (patientAmountDue <= 0) {
-        (doc as any).copayStatus = CopayStatus.PAID;
-        (doc as any).copayPaidAt = undefined;
-        (doc as any).copayPaidByRole = '';
-        (doc as any).copayPaidByUserId = undefined;
+        updateData.copayStatus = CopayStatus.PAID;
+        updateData.copayPaidAt = null;
+        updateData.copayPaidByRole = '';
+        updateData.copayPaidByUserId = null;
       } else {
-        (doc as any).copayStatus = CopayStatus.AWAITING;
-        (doc as any).copayPaidAt = undefined;
-        (doc as any).copayPaidByRole = '';
-        (doc as any).copayPaidByUserId = undefined;
+        updateData.copayStatus = CopayStatus.AWAITING;
+        updateData.copayPaidAt = null;
+        updateData.copayPaidByRole = '';
+        updateData.copayPaidByUserId = null;
       }
     }
 
-    const saved = await doc.save();
+    const saved = await this.prisma.invoice.update({
+      where: { id },
+      data: updateData
+    });
     this.rt.emit('invoice.updated', {
-      id: String(saved._id),
-      patientId: String(saved.patientId),
+      id: saved.id,
+      patientId: saved.patientId,
       paymentStatus: saved.paymentStatus,
       totalCost: saved.totalCost,
-      billingRoute: (saved as any).billingRoute,
+      billingRoute: saved.billingRoute,
     });
     return saved;
   }
 
   async cancelInvoice(id: string, meta?: { userId?: string; roles?: string[] }) {
-    const doc = await this.invoiceModel.findById(id);
+    const doc = await this.prisma.invoice.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Invoice not found');
     if (doc.paymentStatus === PaymentStatus.CANCELED) return doc;
 
-    const route = String((doc as any).billingRoute || '');
+    const route = String(doc.billingRoute || '');
     if (route === BillingRoute.PAYPOINT && doc.paymentStatus === PaymentStatus.PAID) {
       throw new BadRequestException('Paid invoices cannot be canceled');
     }
-    if (route === BillingRoute.NHIA && String((doc as any).nhiaStampStatus || '') === NHIAStampStatus.STAMPED) {
+    if (route === BillingRoute.NHIA && String(doc.nhiaStampStatus || '') === NHIAStampStatus.STAMPED) {
       throw new BadRequestException('Stamped NHIA invoices cannot be canceled');
     }
 
-    doc.paymentStatus = PaymentStatus.CANCELED;
-    (doc as any).paidAt = undefined;
-    (doc as any).paidByRole = '';
-    (doc as any).paidByUserId = undefined;
-
-    doc.items = [] as any;
-    doc.drugs = [] as any;
-    doc.totalCost = 0;
-    (doc as any).patientCopayPercent = 0;
-    (doc as any).patientCopayAmount = 0;
-    (doc as any).patientAmountDue = 0;
-    (doc as any).nhiaAmountDue = 0;
-    (doc as any).copayStatus = CopayStatus.PAID;
-    (doc as any).copayPaidAt = undefined;
-    (doc as any).copayPaidByRole = '';
-    (doc as any).copayPaidByUserId = undefined;
-    (doc as any).nhiaStampStatus = NHIAStampStatus.AWAITING;
-    (doc as any).nhiaStampedAt = undefined;
-    (doc as any).nhiaStampedByRole = '';
-    (doc as any).nhiaStampedByUserId = undefined;
-
-    const saved = await doc.save();
-    this.rt.emit('invoice.updated', {
-      id: String(saved._id),
-      patientId: String(saved.patientId),
-      paymentStatus: saved.paymentStatus,
-      totalCost: saved.totalCost,
-      billingRoute: (saved as any).billingRoute,
+    const saved = await this.prisma.invoice.update({
+      where: { id },
+      data: {
+        paymentStatus: PaymentStatus.CANCELED,
+        paidAt: null,
+        paidByRole: '',
+        paidByUserId: null,
+        items: [] as any,
+        drugs: [] as any,
+        totalCost: 0,
+        patientCopayPercent: 0,
+        patientCopayAmount: 0,
+        patientAmountDue: 0,
+        nhiaAmountDue: 0,
+        copayStatus: CopayStatus.PAID,
+        copayPaidAt: null,
+        copayPaidByRole: '',
+        copayPaidByUserId: null,
+        nhiaStampStatus: NHIAStampStatus.AWAITING,
+        nhiaStampedAt: null,
+        nhiaStampedByRole: '',
+        nhiaStampedByUserId: null,
+      }
     });
 
-    await this.patientModel.findByIdAndUpdate(
-      saved.patientId,
-      { patientStatus: 'ok', patientQueue: '' },
-      { new: false },
-    );
+    this.rt.emit('invoice.updated', {
+      id: saved.id,
+      patientId: saved.patientId,
+      paymentStatus: saved.paymentStatus,
+      totalCost: saved.totalCost,
+      billingRoute: saved.billingRoute,
+    });
+
+    await this.prisma.patient.update({
+      where: { id: saved.patientId },
+      data: { patientStatus: 'ok', patientQueue: '' }
+    });
+
     this.rt.emit('patient.updated', {
-      id: String(saved.patientId),
+      id: saved.patientId,
       patientStatus: 'ok',
       patientQueue: '',
     });
@@ -430,24 +471,27 @@ export class InvoicesService {
   }
 
   async isInvoiceClearedForPharmacy(patientId: string) {
-    const pid = new Types.ObjectId(patientId);
-    const inv = await this.invoiceModel.findOne({ patientId: pid }).sort({ createdAt: -1 }).lean();
+    const inv = await this.prisma.invoice.findFirst({
+      where: { patientId },
+      orderBy: { createdAt: 'desc' }
+    });
+
     if (!inv) return { ok: false, reason: 'No invoice found' };
-    if (String((inv as any).paymentStatus || '') === PaymentStatus.CANCELED) {
+    if (String(inv.paymentStatus || '') === PaymentStatus.CANCELED) {
       return { ok: false, reason: 'Invoice canceled', invoice: inv };
     }
 
-    const route = String((inv as any).billingRoute || '');
+    const route = String(inv.billingRoute || '');
     if (route === BillingRoute.PAYPOINT) {
-      if ((inv as any).paymentStatus === PaymentStatus.PAID) return { ok: true, invoice: inv };
+      if (inv.paymentStatus === PaymentStatus.PAID) return { ok: true, invoice: inv };
       return { ok: false, reason: 'Awaiting payment at paypoint', invoice: inv };
     }
 
-    const stamped = String((inv as any).nhiaStampStatus || '') === NHIAStampStatus.STAMPED;
+    const stamped = String(inv.nhiaStampStatus || '') === NHIAStampStatus.STAMPED;
     if (!stamped) return { ok: false, reason: 'Awaiting NHIA stamp', invoice: inv };
 
-    const due = Number((inv as any).patientAmountDue || 0);
-    if (due > 0 && String((inv as any).copayStatus || '') !== CopayStatus.PAID) {
+    const due = Number(inv.patientAmountDue || 0);
+    if (due > 0 && String(inv.copayStatus || '') !== CopayStatus.PAID) {
       return { ok: false, reason: 'Awaiting NHIA copay payment', invoice: inv };
     }
     return { ok: true, invoice: inv };

@@ -1,7 +1,4 @@
-import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
-
-export type PriceItemDocument = PriceItem & Document;
+export type PriceItemDocument = PriceItem;
 
 export enum PriceCategory {
   DRUG = 'drug',
@@ -14,35 +11,17 @@ export enum PriceCategory {
   OTHER = 'other',
 }
 
-@Schema({ timestamps: true, collection: 'price_list_items' })
 export class PriceItem {
-  @Prop({ trim: true, required: true })
+  id?: string;
   name: string;
-
-  @Prop({ type: String, required: true, trim: true })
   category: string;
-
-  @Prop({ trim: true, default: '' })
-  description: string;
-
-  @Prop({ trim: true, default: 'per item' })
-  unit: string;
-
-  @Prop({ required: true, min: 0 })
+  description?: string;
+  unit?: string;
   price: number;
-
-  @Prop({ default: true })
-  isActive: boolean;
-
-  @Prop({ default: 0 })
-  sortOrder: number;
-
-  @Prop({ default: 0, min: 0 })
-  stockQuantity: number;
-
-  @Prop({ default: 0, min: 0 })
-  soldQuantity: number;
+  isActive?: boolean;
+  sortOrder?: number;
+  stockQuantity?: number;
+  soldQuantity?: number;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
-
-export const PriceItemSchema = SchemaFactory.createForClass(PriceItem);
-PriceItemSchema.index({ category: 1, isActive: 1, name: 1 });

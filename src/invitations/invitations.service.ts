@@ -1,27 +1,31 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { Invitation, InvitationDocument, generateInvitationToken } from './invitations.schema';
+import { PrismaService } from '../prisma/prisma.service';
 import { AppMailerService } from '../mailer/app-mailer.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { UsersService } from '../users/users.service';
 import { DoctorProfileService } from '../doctor-profile/doctor-profile.service';
+import { randomBytes } from 'crypto';
+
+export function generateInvitationToken() {
+  return randomBytes(16).toString('hex');
+}
 
 @Injectable()
 export class InvitationsService {
   private readonly logger = new Logger(InvitationsService.name);
 
   constructor(
-    @InjectModel(Invitation.name) private readonly invitationModel: Model<InvitationDocument>,
+    private readonly prisma: PrismaService,
     private readonly mailer: AppMailerService,
     private readonly usersService: UsersService,
     private readonly doctorProfileService: DoctorProfileService,
     private readonly rt: RealtimeGateway
-  ) { }
+  ) {}
 
-  async inviteDoctor(email: string, invitedBy?: string): Promise<InvitationDocument> {
-    // Check for existing pending invitation — resend if found
-    const existingPending = await this.invitationModel.findOne({ email, role: 'doctor', status: 'pending' });
+  async inviteDoctor(email: string, invitedBy?: string): Promise<any> {
+    const existingPending = await this.prisma.invitation.findFirst({
+      where: { email: email.trim().toLowerCase(), role: 'doctor', status: 'pending' }
+    });
     if (existingPending) {
       this.logger.log(`Resending invitation to existing pending invite for ${email}`);
       const res = await this.mailer.sendInvitation(email, existingPending.token, 'Doctor');
@@ -30,24 +34,36 @@ export class InvitationsService {
       return existingPending;
     }
 
-    // Create new invitation record first
     const token = generateInvitationToken();
     const res = await this.mailer.sendInvitation(email, token, 'Doctor');
     if (!res.ok) throw new ServiceUnavailableException(res.error || 'Failed to send invitation email');
-    const inv = new this.invitationModel({ email, role: 'doctor', token, status: 'pending', invitedBy });
-    const saved = await inv.save();
+    const saved = await this.prisma.invitation.create({
+      data: {
+        email: email.trim().toLowerCase(),
+        role: 'doctor',
+        token,
+        status: 'pending',
+        invitedBy
+      }
+    });
     this.logger.log(`Invitation record created for ${email} (token: ${token.slice(0, 8)}...)`);
     this.rt.emitToRole('super_admin', 'invitation.created', { email, role: 'doctor' });
 
     return saved;
   }
 
-  async inviteNurse(email: string, invitedBy?: string): Promise<InvitationDocument> {
+  async inviteNurse(email: string, invitedBy?: string): Promise<any> {
     return this.inviteStaff(email, invitedBy);
   }
 
-  async inviteStaff(email: string, invitedBy?: string): Promise<InvitationDocument> {
-    const existingPending = await this.invitationModel.findOne({ email, role: { $in: ['staff', 'nurse'] }, status: 'pending' });
+  async inviteStaff(email: string, invitedBy?: string): Promise<any> {
+    const existingPending = await this.prisma.invitation.findFirst({
+      where: {
+        email: email.trim().toLowerCase(),
+        role: { in: ['staff', 'nurse'] },
+        status: 'pending'
+      }
+    });
     if (existingPending) {
       this.logger.log(`Resending invitation to existing pending staff invite for ${email}`);
       const res = await this.mailer.sendInvitation(email, existingPending.token, 'Staff');
@@ -58,19 +74,28 @@ export class InvitationsService {
     const token = generateInvitationToken();
     const res = await this.mailer.sendInvitation(email, token, 'Staff');
     if (!res.ok) throw new ServiceUnavailableException(res.error || 'Failed to send invitation email');
-    const inv = new this.invitationModel({ email, role: 'staff', token, status: 'pending', invitedBy });
-    const saved = await inv.save();
+    const saved = await this.prisma.invitation.create({
+      data: {
+        email: email.trim().toLowerCase(),
+        role: 'staff',
+        token,
+        status: 'pending',
+        invitedBy
+      }
+    });
     this.logger.log(`Staff invitation record created for ${email} (token: ${token.slice(0, 8)}...)`);
     this.rt.emitToRole('super_admin', 'invitation.created', { email, role: 'staff' });
     return saved;
   }
 
-  async findByToken(token: string): Promise<InvitationDocument | null> {
-    return this.invitationModel.findOne({ token });
+  async findByToken(token: string): Promise<any | null> {
+    return this.prisma.invitation.findUnique({ where: { token } });
   }
 
-  async findPendingByEmail(email: string): Promise<InvitationDocument | null> {
-    return this.invitationModel.findOne({ email, role: 'doctor', status: 'pending' });
+  async findPendingByEmail(email: string): Promise<any | null> {
+    return this.prisma.invitation.findFirst({
+      where: { email: email.trim().toLowerCase(), role: 'doctor', status: 'pending' }
+    });
   }
 
   async createDoctorDirect(name: string, email: string) {
@@ -117,7 +142,6 @@ export class InvitationsService {
   }
 
   private generateRandomPassword(): string {
-    // 12+ chars, mixed alphanumerics
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&';
     const len = 14;
     let out = '';
@@ -128,16 +152,19 @@ export class InvitationsService {
   }
 
   async markAcceptedByEmail(email: string): Promise<void> {
-    const inv = await this.invitationModel.findOne({ email, role: 'doctor', status: 'pending' });
+    const inv = await this.prisma.invitation.findFirst({
+      where: { email: email.trim().toLowerCase(), role: 'doctor', status: 'pending' }
+    });
     if (!inv) throw new NotFoundException('Invitation not found');
-    inv.status = 'accepted';
-    inv.acceptedAt = new Date();
-    await inv.save();
+    await this.prisma.invitation.update({
+      where: { id: inv.id },
+      data: { status: 'accepted', acceptedAt: new Date() }
+    });
   }
 
   async acceptByToken(token: string, email: string, password: string, name?: string) {
-    const inv = await this.invitationModel.findOne({ token, status: 'pending' });
-    if (!inv) throw new NotFoundException('Invitation not found or already processed');
+    const inv = await this.prisma.invitation.findUnique({ where: { token } });
+    if (!inv || inv.status !== 'pending') throw new NotFoundException('Invitation not found or already processed');
     if (inv.email.toLowerCase() !== email.toLowerCase()) {
       throw new BadRequestException('Email does not match this invitation');
     }
@@ -146,9 +173,10 @@ export class InvitationsService {
     if (role === 'staff') patch.department = 'GOPD';
     const user = await this.usersService.create(patch);
     await this.usersService.assignRoles(user.id, [...(user.roles || []), role]);
-    inv.status = 'accepted';
-    inv.acceptedAt = new Date();
-    await inv.save();
+    await this.prisma.invitation.update({
+      where: { id: inv.id },
+      data: { status: 'accepted', acceptedAt: new Date() }
+    });
     if (role === 'doctor') await this.mailer.sendDoctorWelcome(user.email, user.name);
     this.rt.emitToRole('super_admin', 'invitation.accepted', { email: user.email, role });
     return { ok: true };

@@ -1,11 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { DoctorProfile, DoctorProfileDocument } from './doctor-profile.schema';
-
-type DeepPartial<T> = {
-  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K];
-};
+import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { PasswordService } from '../common/security/password';
 import { randomBytes } from 'crypto';
@@ -13,92 +7,112 @@ import { randomBytes } from 'crypto';
 @Injectable()
 export class DoctorProfileService {
   constructor(
-    @InjectModel(DoctorProfile.name) private readonly profileModel: Model<DoctorProfileDocument>,
+    private readonly prisma: PrismaService,
     private readonly rt: RealtimeGateway,
     private readonly passwordService: PasswordService
   ) {}
 
-  async createSkeleton(userId: string, email: string, name?: string): Promise<DoctorProfileDocument> {
-    const existing = await this.profileModel.findOne({ userId }).lean();
-    if (existing) {
-      const doc = await this.profileModel.findOne({ userId });
-      if (!doc) throw new NotFoundException('Profile not found');
-      return doc;
-    }
-    const profile = new this.profileModel({
-      userId,
-      personalInfo: {
-        id: userId,
-        fullName: name ?? '',
-        email,
-        status: 'pending'
+  async createSkeleton(userId: string, email: string, name?: string): Promise<any> {
+    const existing = await this.prisma.doctorProfile.findUnique({ where: { userId } });
+    if (existing) return existing;
+
+    return this.prisma.doctorProfile.create({
+      data: {
+        userId,
+        personalInfo: {
+          id: userId,
+          fullName: name ?? '',
+          email: (email || '').trim().toLowerCase(),
+          status: 'pending'
+        }
       }
     });
-    return profile.save();
   }
 
-  async listAll(): Promise<DoctorProfileDocument[]> {
-    return this.profileModel.find({});
+  async listAll(): Promise<any[]> {
+    return this.prisma.doctorProfile.findMany();
   }
 
-  async findByEmail(email: string): Promise<DoctorProfileDocument | null> {
+  async findByEmail(email: string): Promise<any | null> {
     const e = (email || '').trim().toLowerCase();
-    return this.profileModel.findOne({ 'personalInfo.email': e });
+    return this.prisma.doctorProfile.findFirst({
+      where: {
+        personalInfo: {
+          path: ['email'],
+          equals: e
+        }
+      }
+    });
   }
 
-  async createWithAuth(name: string, email: string, password: string): Promise<DoctorProfileDocument> {
+  async createWithAuth(name: string, email: string, password: string): Promise<any> {
     const userId = randomBytes(12).toString('hex');
     const hash = await this.passwordService.hash(password);
-    const profile = new this.profileModel({
-      userId,
-      passwordHash: hash,
-      passwordVersion: 1,
-      personalInfo: {
-        id: userId,
-        fullName: name ?? '',
-        email: (email || '').trim().toLowerCase(),
-        status: 'pending'
+    const profile = await this.prisma.doctorProfile.create({
+      data: {
+        userId,
+        passwordHash: hash,
+        passwordVersion: 1,
+        personalInfo: {
+          id: userId,
+          fullName: name ?? '',
+          email: (email || '').trim().toLowerCase(),
+          status: 'pending'
+        }
       }
     });
-    const saved = await profile.save();
     this.rt.emit('profile.updated', { userId });
-    return saved;
+    return profile;
   }
 
-  async validatePassword(profile: DoctorProfileDocument, plain: string): Promise<boolean> {
+  async validatePassword(profile: any, plain: string): Promise<boolean> {
     if (!profile.passwordHash) return false;
     return this.passwordService.verify(plain, profile.passwordHash);
   }
 
   async setRefreshToken(userId: string, tokenHash: string): Promise<void> {
-    await this.profileModel.findOneAndUpdate({ userId }, { refreshTokenHash: tokenHash });
+    await this.prisma.doctorProfile.update({
+      where: { userId },
+      data: { refreshTokenHash: tokenHash }
+    });
   }
 
   async clearRefreshToken(userId: string): Promise<void> {
-    await this.profileModel.findOneAndUpdate({ userId }, { $unset: { refreshTokenHash: '' } });
+    await this.prisma.doctorProfile.update({
+      where: { userId },
+      data: { refreshTokenHash: null }
+    });
   }
 
   async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
-    const profile = await this.profileModel.findOne({ userId });
+    const profile = await this.prisma.doctorProfile.findUnique({ where: { userId } });
     if (!profile) throw new NotFoundException('Profile not found');
     const ok = await this.validatePassword(profile, currentPassword);
     if (!ok) throw new NotFoundException('Invalid current password');
     const hash = await this.passwordService.hash(newPassword);
-    profile.passwordHash = hash;
-    profile.passwordVersion = (profile.passwordVersion ?? 1) + 1;
-    profile.refreshTokenHash = undefined;
-    await profile.save();
+    await this.prisma.doctorProfile.update({
+      where: { userId },
+      data: {
+        passwordHash: hash,
+        passwordVersion: (profile.passwordVersion ?? 1) + 1,
+        refreshTokenHash: null
+      }
+    });
   }
 
   async resetPassword(userId: string): Promise<{ password: string }> {
     const pass = this.generateRandomPassword();
     const hash = await this.passwordService.hash(pass);
-    const updated = await this.profileModel.findOneAndUpdate(
-      { userId },
-      { passwordHash: hash, $inc: { passwordVersion: 1 } },
-      { new: true }
-    );
-    if (!updated) throw new NotFoundException('Profile not found');
+    const profile = await this.prisma.doctorProfile.findUnique({ where: { userId } });
+    if (!profile) throw new NotFoundException('Profile not found');
+    await this.prisma.doctorProfile.update({
+      where: { userId },
+      data: {
+        passwordHash: hash,
+        passwordVersion: (profile.passwordVersion ?? 1) + 1,
+        refreshTokenHash: null
+      }
+    });
     return { password: pass };
   }
 
@@ -110,43 +124,51 @@ export class DoctorProfileService {
     return out;
   }
 
-  async findByUserId(userId: string): Promise<DoctorProfileDocument> {
-    const profile = await this.profileModel.findOne({ userId });
+  async findByUserId(userId: string): Promise<any> {
+    const profile = await this.prisma.doctorProfile.findUnique({ where: { userId } });
     if (!profile) throw new NotFoundException('Profile not found');
     return profile;
   }
 
-  async updateForUser(userId: string, patch: Record<string, any>): Promise<DoctorProfileDocument> {
-    const profile = await this.profileModel.findOneAndUpdate({ userId }, { $set: patch }, { new: true });
+  async updateForUser(userId: string, patch: Record<string, any>): Promise<any> {
+    const profile = await this.prisma.doctorProfile.findUnique({ where: { userId } });
     if (!profile) throw new NotFoundException('Profile not found');
-    return profile;
+    return this.prisma.doctorProfile.update({
+      where: { userId },
+      data: patch as any
+    });
   }
 
-  async completeOnboarding(userId: string): Promise<DoctorProfileDocument> {
-    const profile = await this.profileModel.findOneAndUpdate(
-      { userId },
-      { 'personalInfo.status': 'active' },
-      { new: true }
-    );
+  async completeOnboarding(userId: string): Promise<any> {
+    const profile = await this.prisma.doctorProfile.findUnique({ where: { userId } });
     if (!profile) throw new NotFoundException('Profile not found');
+    const personalInfo: any = profile.personalInfo || {};
+    personalInfo.status = 'active';
+    const updated = await this.prisma.doctorProfile.update({
+      where: { userId },
+      data: { personalInfo }
+    });
     this.rt.emit('profile.updated', { userId });
-    return profile;
+    return updated;
   }
 
-  async updateStatus(userId: string, status: string): Promise<DoctorProfileDocument> {
-    const profile = await this.profileModel.findOneAndUpdate(
-      { userId },
-      { 'personalInfo.status': status },
-      { new: true }
-    );
+  async updateStatus(userId: string, status: string): Promise<any> {
+    const profile = await this.prisma.doctorProfile.findUnique({ where: { userId } });
     if (!profile) throw new NotFoundException('Profile not found');
+    const personalInfo: any = profile.personalInfo || {};
+    personalInfo.status = status;
+    const updated = await this.prisma.doctorProfile.update({
+      where: { userId },
+      data: { personalInfo }
+    });
     this.rt.emit('profile.updated', { userId, status });
-    return profile;
+    return updated;
   }
 
   async deleteByUserId(userId: string): Promise<{ ok: true }> {
-    const res = await this.profileModel.findOneAndDelete({ userId });
-    if (!res) throw new NotFoundException('Profile not found');
+    const profile = await this.prisma.doctorProfile.findUnique({ where: { userId } });
+    if (!profile) throw new NotFoundException('Profile not found');
+    await this.prisma.doctorProfile.delete({ where: { userId } });
     this.rt.emit('profile.deleted', { userId });
     return { ok: true };
   }

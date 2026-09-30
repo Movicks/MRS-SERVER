@@ -1,16 +1,33 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { Patient, PatientDocument } from '../patients/patient.schema';
+import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { PriceListService } from '../price-list/price-list.service';
-import { WardAdmission, WardAdmissionDocument, WardAdmissionStatus, type WardMedicationOrder } from './ward-admission.schema';
+
+export enum WardAdmissionStatus {
+  ADMITTED = 'admitted',
+  DISCHARGED = 'discharged',
+}
+
+export type WardMedicationOrder = {
+  priceItemId: string;
+  name: string;
+  quantity: number;
+  instructions: string;
+  usage: string;
+};
+
+export type WardMedicationAdministration = {
+  drugPriceItemId: string;
+  scheduledAt: Date;
+  administeredAt: Date;
+  administeredByUserId?: string;
+  administeredByRole?: string;
+};
 
 @Injectable()
 export class WardsService {
   constructor(
-    @InjectModel(WardAdmission.name) private readonly admissions: Model<WardAdmissionDocument>,
-    @InjectModel(Patient.name) private readonly patients: Model<PatientDocument>,
+    private readonly prisma: PrismaService,
     private readonly priceList: PriceListService,
     private readonly rt: RealtimeGateway,
   ) {}
@@ -50,12 +67,25 @@ export class WardsService {
     const q: any = {};
     if (opts?.wardUnit) q.wardUnit = this.normalizeWardUnit(opts.wardUnit);
     if (opts?.status && opts.status !== 'all') q.status = opts.status;
-    const docs = await this.admissions.find(q).sort({ admittedAt: -1 }).populate('patientId').lean();
-    return (docs as any[]).map((d) => {
-      const p = d.patientId || {};
+
+    const docs = await this.prisma.wardAdmission.findMany({
+      where: q,
+      orderBy: { admittedAt: 'desc' }
+    });
+
+    const patientIds = Array.from(new Set(docs.map((d) => d.patientId).filter(Boolean)));
+    const patients = await this.prisma.patient.findMany({
+      where: { id: { in: patientIds } }
+    });
+    const patientMap = new Map<string, any>();
+    for (const p of patients) patientMap.set(p.id, p);
+
+    return docs.map((d) => {
+      const p = patientMap.get(d.patientId) || {};
       return {
-        _id: String(d._id),
-        patientId: String(p._id || d.patientId),
+        _id: d.id,
+        id: d.id,
+        patientId: d.patientId,
         fullName: [p.surname, p.firstname, p.middlename].filter(Boolean).join(' '),
         cardNumber: p.veteran ? (p.serviceNumber || '') : (p.membershipNumber || ''),
         phone: p.phone || '',
@@ -69,8 +99,8 @@ export class WardsService {
         status: d.status,
         dischargedAt: d.dischargedAt || null,
         pharmacyPrescription: d.pharmacyPrescription || '',
-        medicationOrders: Array.isArray(d.medicationOrders) ? d.medicationOrders : [],
-        medicationAdministrations: Array.isArray(d.medicationAdministrations) ? d.medicationAdministrations : [],
+        medicationOrders: Array.isArray(d.medicationOrders as any) ? d.medicationOrders : [],
+        medicationAdministrations: Array.isArray(d.medicationAdministrations as any) ? d.medicationAdministrations : [],
       };
     });
   }
@@ -86,8 +116,8 @@ export class WardsService {
     },
     meta?: { userId?: string; roles?: string[] }
   ) {
-    const pid = new Types.ObjectId(payload.patientId);
-    const patient = await this.patients.findById(pid).lean();
+    const pid = payload.patientId;
+    const patient = await this.prisma.patient.findUnique({ where: { id: pid } });
     if (!patient) throw new NotFoundException('Patient not found');
 
     const wardUnit = this.normalizeWardUnit(payload.wardUnit);
@@ -98,7 +128,9 @@ export class WardsService {
       throw new BadRequestException('Quantity must be a positive integer');
     }
 
-    const existing = await this.admissions.findOne({ patientId: pid, status: WardAdmissionStatus.ADMITTED }).lean();
+    const existing = await this.prisma.wardAdmission.findFirst({
+      where: { patientId: pid, status: WardAdmissionStatus.ADMITTED }
+    });
     if (existing) throw new BadRequestException('Patient is already admitted');
 
     const bedPriceItemId = String(payload.bedPriceItemId || '').trim();
@@ -118,28 +150,29 @@ export class WardsService {
     await this.priceList.occupyBed(bedPriceItemId, quantity);
 
     const admittedByRole = this.pickRole(meta?.roles, ['pharmacy', 'recording', 'admin', 'super_admin']);
-    const doc = new this.admissions({
-      patientId: pid,
-      wardUnit,
-      bedPriceItemId,
-      quantity,
-      admittedAt: new Date(),
-      admittedByUserId: meta?.userId ? new Types.ObjectId(meta.userId) : undefined,
-      admittedByRole,
-      status: WardAdmissionStatus.ADMITTED,
-      pharmacyPrescription,
-      medicationOrders,
-      medicationAdministrations: [],
+    const saved = await this.prisma.wardAdmission.create({
+      data: {
+        patientId: pid,
+        wardUnit,
+        bedPriceItemId,
+        quantity,
+        admittedAt: new Date(),
+        admittedByUserId: meta?.userId,
+        admittedByRole,
+        status: WardAdmissionStatus.ADMITTED,
+        pharmacyPrescription,
+        medicationOrders: medicationOrders as any,
+        medicationAdministrations: [] as any,
+      }
     });
-    const saved = await doc.save();
-    this.rt.emit('wardAdmission.created', { id: String(saved._id), patientId: payload.patientId, wardUnit });
-    return saved.toObject();
+    this.rt.emit('wardAdmission.created', { id: saved.id, patientId: payload.patientId, wardUnit });
+    return saved;
   }
 
   async discharge(id: string, meta?: { userId?: string; roles?: string[] }) {
-    const doc = await this.admissions.findById(id);
+    const doc = await this.prisma.wardAdmission.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Ward admission not found');
-    if (doc.status === WardAdmissionStatus.DISCHARGED) return doc.toObject();
+    if (doc.status === WardAdmissionStatus.DISCHARGED) return doc;
 
     const bedPriceItemId = String(doc.bedPriceItemId || '').trim();
     const qty = Number(doc.quantity || 1);
@@ -148,13 +181,17 @@ export class WardsService {
     }
 
     const dischargedByRole = this.pickRole(meta?.roles, ['ward', 'pharmacy', 'admin', 'super_admin']);
-    doc.status = WardAdmissionStatus.DISCHARGED;
-    doc.dischargedAt = new Date();
-    doc.dischargedByRole = dischargedByRole;
-    doc.dischargedByUserId = meta?.userId ? new Types.ObjectId(meta.userId) : undefined;
-    const saved = await doc.save();
-    this.rt.emit('wardAdmission.updated', { id: String(saved._id), patientId: String(saved.patientId), wardUnit: saved.wardUnit, status: saved.status });
-    return saved.toObject();
+    const saved = await this.prisma.wardAdmission.update({
+      where: { id },
+      data: {
+        status: WardAdmissionStatus.DISCHARGED,
+        dischargedAt: new Date(),
+        dischargedByRole,
+        dischargedByUserId: meta?.userId
+      }
+    });
+    this.rt.emit('wardAdmission.updated', { id: saved.id, patientId: saved.patientId, wardUnit: saved.wardUnit, status: saved.status });
+    return saved;
   }
 
   async administerMedication(
@@ -162,7 +199,7 @@ export class WardsService {
     payload: { drugPriceItemId: string; scheduledAt: string | Date },
     meta?: { userId?: string; roles?: string[] }
   ) {
-    const doc = await this.admissions.findById(admissionId);
+    const doc = await this.prisma.wardAdmission.findUnique({ where: { id: admissionId } });
     if (!doc) throw new NotFoundException('Ward admission not found');
     if (doc.status !== WardAdmissionStatus.ADMITTED) throw new BadRequestException('Patient is not currently admitted');
 
@@ -172,27 +209,32 @@ export class WardsService {
     const scheduledAt = new Date(payload.scheduledAt as any);
     if (!Number.isFinite(scheduledAt.getTime())) throw new BadRequestException('Invalid scheduledAt');
 
+    const currentAdmins = Array.isArray(doc.medicationAdministrations as any) ? (doc.medicationAdministrations as any[]) : [];
     const scheduledAtMs = scheduledAt.getTime();
-    const existing = (doc.medicationAdministrations || []).find(
+    const existing = currentAdmins.find(
       (x: any) => String(x?.drugPriceItemId || '') === drugPriceItemId && new Date(x?.scheduledAt as any).getTime() === scheduledAtMs
     );
-    if (existing) return doc.toObject();
+    if (existing) return doc;
 
     const administeredByRole = this.pickRole(meta?.roles, ['staff', 'pharmacy', 'admin', 'super_admin']);
-    (doc.medicationAdministrations as any) = [
-      ...(doc.medicationAdministrations || []),
+    const updatedAdmins = [
+      ...currentAdmins,
       {
         drugPriceItemId,
         scheduledAt,
         administeredAt: new Date(),
-        administeredByUserId: meta?.userId ? new Types.ObjectId(meta.userId) : undefined,
+        administeredByUserId: meta?.userId,
         administeredByRole,
       },
     ];
 
-    const saved = await doc.save();
-    this.rt.emit('wardAdmission.updated', { id: String(saved._id), patientId: String(saved.patientId), wardUnit: saved.wardUnit });
-    return saved.toObject();
+    const saved = await this.prisma.wardAdmission.update({
+      where: { id: admissionId },
+      data: { medicationAdministrations: updatedAdmins as any }
+    });
+
+    this.rt.emit('wardAdmission.updated', { id: saved.id, patientId: saved.patientId, wardUnit: saved.wardUnit });
+    return saved;
   }
 
   async updateMedicationOrders(
@@ -200,7 +242,7 @@ export class WardsService {
     payload: { pharmacyPrescription?: string; medicationOrders?: WardMedicationOrder[] },
     meta?: { userId?: string; roles?: string[] }
   ) {
-    const doc = await this.admissions.findById(admissionId);
+    const doc = await this.prisma.wardAdmission.findUnique({ where: { id: admissionId } });
     if (!doc) throw new NotFoundException('Ward admission not found');
     if (doc.status !== WardAdmissionStatus.ADMITTED) throw new BadRequestException('Patient is not currently admitted');
 
@@ -218,12 +260,16 @@ export class WardsService {
       }))
       .filter((o) => !!o.priceItemId && !!o.name && Number(o.quantity) > 0);
 
-    doc.pharmacyPrescription = pharmacyPrescription;
-    doc.medicationOrders = medicationOrders as any;
+    const saved = await this.prisma.wardAdmission.update({
+      where: { id: admissionId },
+      data: {
+        pharmacyPrescription,
+        medicationOrders: medicationOrders as any
+      }
+    });
 
-    const saved = await doc.save();
     const role = this.pickRole(meta?.roles, ['staff', 'pharmacy', 'doctor', 'recording', 'admin', 'super_admin']);
-    this.rt.emit('wardAdmission.updated', { id: String(saved._id), patientId: String(saved.patientId), wardUnit: saved.wardUnit, updatedByRole: role });
-    return saved.toObject();
+    this.rt.emit('wardAdmission.updated', { id: saved.id, patientId: saved.patientId, wardUnit: saved.wardUnit, updatedByRole: role });
+    return saved;
   }
 }
