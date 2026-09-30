@@ -1,0 +1,20 @@
+<div style="font-family: Inter, Arial, sans-serif; background:#f7fafc; padding:24px">
+  <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden">
+    <tr>
+      <td style="padding:24px">
+        <h2 style="margin:0 0 12px 0;font-size:20px;color:#111827">Welcome to {{appName}}</h2>
+        <p style="margin:0 0 16px 0;color:#374151;font-size:14px">
+          {{#if name}}Hi {{name}},{{else}}Hi,{{/if}}
+        </p>
+        <p style="margin:0 0 16px 0;color:#374151;font-size:14px">
+          Your account has been created. You can now sign in using your email and password.
+        </p>
+        {{#if landing}}
+        <p style="text-align:center;margin:24px 0">
+          <a href="{{landing}}" style="display:inline-block;background:#10b981;color:#ffffff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Go to {{appName}}</a>
+        </p>
+        {{/if}}
+      </td>
+    </tr>
+  </table>
+</div>
